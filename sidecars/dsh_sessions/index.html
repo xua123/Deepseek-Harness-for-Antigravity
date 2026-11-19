@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="frame-src 'none'; child-src 'none'">
+  <title>DSH Sessions</title>
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="header">
+      <div class="header-top">
+        <div class="title-group">
+          <h1 class="title">DSH Sessions</h1>
+          <span id="live-pill" class="live-pill" title="每 4 秒自动刷新">
+            <span class="live-dot" aria-hidden="true"></span>
+            <span id="live-text">Live</span>
+          </span>
+        </div>
+        <button id="refresh-btn" type="button" class="icon-btn" title="立即刷新" aria-label="立即刷新">
+          刷新
+        </button>
+      </div>
+
+      <div class="toolbar">
+        <div class="segmented" role="tablist" aria-label="会话筛选">
+          <button id="tab-active" type="button" role="tab" aria-selected="true" class="seg-btn active" data-filter="active">
+            运行中 <span id="count-active" class="badge">0</span>
+          </button>
+          <button id="tab-all" type="button" role="tab" aria-selected="false" class="seg-btn" data-filter="all">
+            全部 <span id="count-all" class="badge">0</span>
+          </button>
+        </div>
+        <input id="search-input" type="search" class="search-input" placeholder="筛选标题 / ID / 目录 / 模型…" aria-label="搜索会话">
+      </div>
+
+      <div id="summary-bar" class="summary-bar">正在加载会话列表…</div>
+    </header>
+
+    <main id="session-list" class="session-list" aria-live="polite"></main>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

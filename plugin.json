@@ -1,0 +1,11 @@
+{
+  "name": "dsh-monitor",
+  "displayName": "DeepSeek Harness Monitor",
+  "version": "1.0.0",
+  "description": "Monitor local DeepSeek Harness (.dsh) sessions: list active sessions, inspect recent reasoning/tool steps from zstd trajectories, and detect errors, stalls, or empty-result false passes.",
+  "suggestedPrompts": [
+    "列出当前正在运行的 DeepSeek Harness 会话",
+    "查看 DeepSeek Harness 最近 5 步在干什么",
+    "巡检 DeepSeek Harness 当前任务有没有报错、卡住或假通过"
+  ]
+}

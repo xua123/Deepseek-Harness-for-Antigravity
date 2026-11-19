@@ -1,0 +1,21 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "restart_policy": "always",
+  "display_name": "DSH Sessions",
+  "description": "Live DeepSeek Harness (.dsh) session monitor: view running and recent sessions, inspect recent reasoning/tool steps, and detect stalls or errors.",
+  "has_web_ui": true,
+  "agent_permissions": {
+    "allows_user_interactions": false
+  },
+  "ui_config": {
+    "display_name": "DSH Sessions",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "DSH Sessions"
+      }
+    ]
+  }
+}

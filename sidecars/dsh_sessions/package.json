@@ -1,0 +1,6 @@
+{
+  "name": "dsh_sessions",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "DeepSeek Harness (.dsh) session monitor UI sidecar for Antigravity"
+}
