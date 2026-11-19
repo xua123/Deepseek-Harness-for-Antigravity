@@ -171,10 +171,30 @@
     render();
   }
 
-  function buildGroups() {
-    if (!state.data || !Array.isArray(state.data.sessions)) return [];
+  function buildCategorizedGroups() {
+    if (!state.data || !Array.isArray(state.data.sessions)) {
+      return { workingGroups: [], stoppedGroups: [] };
+    }
     const q = state.query.trim().toLowerCase();
-    const groupsMap = new Map();
+    const workingMap = new Map();
+    const stoppedMap = new Map();
+
+    const addToMap = (map, s, wsName, isRunning) => {
+      const key = `${isRunning ? 'w:' : 's:'}${s.cwd || '__temp__'}`;
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          label: wsName,
+          cwd: s.cwd || '',
+          sessions: [],
+          hasActive: isRunning,
+          latestMtime: 0,
+        });
+      }
+      const g = map.get(key);
+      g.sessions.push(s);
+      if (s.mtime_ms > g.latestMtime) g.latestMtime = s.mtime_ms;
+    };
 
     for (const s of state.data.sessions) {
       const isRunning = s.status === 'RUNNING' || s.status === 'STALLED';
@@ -191,37 +211,34 @@
         if (!hit) continue;
       }
 
-      const key = s.cwd || '__temp__';
-      if (!groupsMap.has(key)) {
-        groupsMap.set(key, {
-          key,
-          label: wsName,
-          cwd: s.cwd || '',
-          sessions: [],
-          hasActive: false,
-          latestMtime: 0,
-        });
-      }
-      const g = groupsMap.get(key);
-      g.sessions.push(s);
-      if (isRunning) g.hasActive = true;
-      if (s.mtime_ms > g.latestMtime) g.latestMtime = s.mtime_ms;
+      if (isRunning) addToMap(workingMap, s, wsName, true);
+      else addToMap(stoppedMap, s, wsName, false);
     }
 
-    const groups = [...groupsMap.values()];
-    for (const g of groups) {
-      g.sessions.sort((a, b) => {
-        const pa = state.pinned.has(a.session_id) ? 1 : 0;
-        const pb = state.pinned.has(b.session_id) ? 1 : 0;
-        if (pa !== pb) return pb - pa;
-        return b.mtime_ms - a.mtime_ms;
-      });
-    }
-    groups.sort((a, b) => {
-      if (a.hasActive !== b.hasActive) return a.hasActive ? -1 : 1;
-      return b.latestMtime - a.latestMtime;
-    });
-    return groups;
+    const finalize = (map) => {
+      const list = [...map.values()];
+      for (const g of list) {
+        g.sessions.sort((a, b) => {
+          const pa = state.pinned.has(a.session_id) ? 1 : 0;
+          const pb = state.pinned.has(b.session_id) ? 1 : 0;
+          if (pa !== pb) return pb - pa;
+          return b.mtime_ms - a.mtime_ms;
+        });
+      }
+      list.sort((a, b) => b.latestMtime - a.latestMtime);
+      return list;
+    };
+
+    return {
+      workingGroups: finalize(workingMap),
+      stoppedGroups: finalize(stoppedMap),
+    };
+  }
+
+  function renderStepStatusIcon(status) {
+    if (status === 'running') return `<span class="eng-icon running" title="执行中">⟳</span>`;
+    if (status === 'error') return `<span class="eng-icon error" title="异常">✕</span>`;
+    return `<span class="eng-icon done" title="已完成">✓</span>`;
   }
 
   function renderDetail(s) {
@@ -232,7 +249,7 @@
 
     let bodyHtml = '';
     if (!entry || entry.loading) {
-      bodyHtml = `<div style="color:var(--fg-muted);font-size:11.5px;">正在加载轨迹与巡检…</div>`;
+      bodyHtml = `<div style="color:var(--fg-muted);font-size:11.5px;">正在整理工程实现步骤…</div>`;
     } else if (entry.error) {
       bodyHtml = `<div class="error-msg">${esc(entry.error)}</div>`;
     } else {
@@ -243,31 +260,36 @@
       } else if (d.inspect) {
         const findings = d.inspect.findings || [];
         inspectHtml = findings.length === 0
-          ? `<div class="inspect-ok">巡检正常 · 无卡死或报错</div>`
-          : findings.map((f) => `<div class="finding ${esc(f.level)}"><b>[${esc(f.level)}]</b> ${esc(f.message)}</div>`).join('');
+          ? `<div class="inspect-ok">状态正常 · 无卡死或报错</div>`
+          : findings.slice(0, 3).map((f) => `<div class="finding ${esc(f.level)}"><b>[${esc(f.level)}]</b> ${esc(f.message)}</div>`).join('');
       }
 
-      let tailHtml = '';
-      if (d.tailError) {
-        tailHtml = `<div class="error-msg">${esc(d.tailError)}</div>`;
-      } else if (d.tail) {
-        const items = d.tail.items || [];
-        tailHtml = items.length === 0
-          ? `<div style="color:var(--fg-muted);font-size:11.5px;">暂无轨迹事件</div>`
-          : `<div class="timeline">${items.slice().reverse().map((it) => {
-              const tag = String(it.tag || '');
-              const cls = tag.includes('reasoning') ? 'reasoning' : tag.includes('result') ? 'result' : '';
-              return `
-                <div class="step-row">
-                  <div class="step-head">
-                    <span class="step-tag ${cls} mono">${esc(tag)}</span>
-                    <span class="mono">#${esc(it.seq ?? '-')}</span>
-                  </div>
-                  <pre class="step-text">${esc(it.text || '')}</pre>
-                </div>`;
-            }).join('')}</div>`;
+      let stepsHtml = '';
+      if (d.planError) {
+        stepsHtml = `<div class="error-msg">${esc(d.planError)}</div>`;
+      } else if (d.plan) {
+        const reqs = d.plan.requirements || [];
+        const latestReq = reqs.length > 0 ? reqs[reqs.length - 1] : null;
+        const reqHtml = latestReq && latestReq.prompt
+          ? `<div class="req-goal"><span class="req-label">当前需求</span><span class="req-text">${esc(latestReq.prompt)}</span></div>`
+          : '';
+
+        const items = d.plan.steps || [];
+        const listHtml = items.length === 0
+          ? `<div style="color:var(--fg-muted);font-size:11.5px;">暂无工程实现步骤</div>`
+          : `<ol class="eng-list">${items.map((st) => `
+              <li class="eng-step ${esc(st.status || 'done')}">
+                <div class="eng-row">
+                  ${renderStepStatusIcon(st.status)}
+                  <span class="eng-phase">${esc(st.phase || '工程执行')}</span>
+                  <span class="eng-title">${esc(st.title || '')}</span>
+                </div>
+                ${st.note ? `<div class="eng-note">${esc(st.note)}</div>` : ''}
+              </li>`).join('')}</ol>`;
+
+        stepsHtml = `${reqHtml}${listHtml}`;
       }
-      bodyHtml = `${inspectHtml}${tailHtml}`;
+      bodyHtml = `${inspectHtml}${stepsHtml}`;
     }
 
     return `
@@ -377,17 +399,14 @@
       return;
     }
 
-    const groups = buildGroups();
-    if (groups.length === 0) {
+    const { workingGroups, stoppedGroups } = buildCategorizedGroups();
+    if (workingGroups.length === 0 && stoppedGroups.length === 0) {
       els.tree.innerHTML = `<div class="empty-state">${state.activeOnly ? '当前没有运行中的会话' : '没有匹配的会话'}</div>`;
       return;
     }
 
-    const workingGroups = groups.filter((g) => g.hasActive);
-    const stoppedGroups = groups.filter((g) => !g.hasActive);
-
     const sections = [
-      renderCategory('working', '工作目录', 'active', workingGroups, '暂无运行中的目录'),
+      renderCategory('working', '工作目录', 'active', workingGroups, '暂无正在工作的会话'),
     ];
     if (!state.activeOnly) {
       sections.push(renderCategory('stopped', '停止目录', 'stopped', stoppedGroups, '暂无已停止的目录'));

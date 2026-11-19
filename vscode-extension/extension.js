@@ -294,8 +294,8 @@ class DshSidebarProvider {
     const safeSteps = Math.min(30, Math.max(1, Number(steps) || 6));
     const { dshDir, pythonPath, staleSec } = getConfig();
 
-    const [tailRes, inspectRes] = await Promise.all([
-      runMonitorJson(this._context.extensionPath, dshDir, pythonPath, 'tail', ['--session', sid, '--steps', String(safeSteps)]),
+    const [stepsRes, inspectRes] = await Promise.all([
+      runMonitorJson(this._context.extensionPath, dshDir, pythonPath, 'steps', ['--session', sid, '--steps', String(safeSteps)]),
       runMonitorJson(this._context.extensionPath, dshDir, pythonPath, 'inspect', ['--session', sid, '--stale-sec', String(staleSec)]),
     ]);
 
@@ -305,8 +305,8 @@ class DshSidebarProvider {
       data: {
         sessionId: sid,
         steps: safeSteps,
-        tail: tailRes.ok ? tailRes.data : null,
-        tailError: tailRes.ok ? null : tailRes.error,
+        plan: stepsRes.ok ? stepsRes.data : null,
+        planError: stepsRes.ok ? null : stepsRes.error,
         inspect: inspectRes.ok ? inspectRes.data : null,
         inspectError: inspectRes.ok ? null : inspectRes.error,
       },

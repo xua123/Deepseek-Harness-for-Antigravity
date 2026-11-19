@@ -230,16 +230,16 @@ app.api('/api/session/detail', async (data) => {
   const steps = Math.min(30, Math.max(1, Number(data.steps) || 6));
   const staleSec = Math.max(30, Number(data.staleSec) || 300);
 
-  const [tailRes, inspectRes] = await Promise.all([
-    runMonitorJson('tail', ['--session', sessionId, '--steps', String(steps)]),
+  const [stepsRes, inspectRes] = await Promise.all([
+    runMonitorJson('steps', ['--session', sessionId, '--steps', String(steps)]),
     runMonitorJson('inspect', ['--session', sessionId, '--stale-sec', String(staleSec)]),
   ]);
 
   return {
     sessionId,
     steps,
-    tail: tailRes.ok ? tailRes.data : null,
-    tailError: tailRes.ok ? null : tailRes.error,
+    plan: stepsRes.ok ? stepsRes.data : null,
+    planError: stepsRes.ok ? null : stepsRes.error,
     inspect: inspectRes.ok ? inspectRes.data : null,
     inspectError: inspectRes.ok ? null : inspectRes.error,
   };
