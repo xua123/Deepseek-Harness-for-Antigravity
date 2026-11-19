@@ -353,47 +353,30 @@ class DshSidebarProvider {
 
     await vscode.env.clipboard.writeText(promptText);
 
-    // 尝试自动填入 Antigravity / IDE 聊天输入框（优先原生命令带入，否则聚焦后系统级 Ctrl+V 粘贴）
+    // 尝试自动填入 Antigravity 聊天输入框：使用官方 antigravity.toggleChatFocus 聚焦输入框后触发粘贴
     let pasted = false;
     try {
       const cmds = await vscode.commands.getCommands(true);
-      if (cmds.includes('workbench.action.chat.open')) {
-        try {
-          await vscode.commands.executeCommand('workbench.action.chat.open', {
-            query: promptText,
-            isPartialQuery: true,
-          });
+      if (cmds.includes('antigravity.toggleChatFocus')) {
+        await vscode.commands.executeCommand('antigravity.toggleChatFocus');
+        await new Promise((r) => setTimeout(r, 250));
+        if (process.platform === 'win32') {
+          await execFileAsync(
+            'powershell',
+            ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', "$ws = New-Object -ComObject WScript.Shell; $ws.SendKeys('^v')"],
+            { timeout: 3000, windowsHide: true },
+          );
           pasted = true;
-        } catch {
-          // Ignore and try focus + paste fallback.
+        } else {
+          await vscode.commands.executeCommand('editor.action.clipboardPasteAction');
+          pasted = true;
         }
-      }
-
-      if (!pasted) {
-        const focusCandidates = [
-          'antigravity.agentView.focus',
-          'antigravity.chat.focus',
-          'antigravity.prioritized.chat.open',
-          'workbench.panel.chat.view.copilot.focus',
-          'workbench.action.chat.open',
-        ];
-        const focusCmd = focusCandidates.find((c) => cmds.includes(c))
-          || cmds.find((c) => /(?:antigravity|cascade|chat).*(?:focus|open)/i.test(c));
-        if (focusCmd) {
-          await vscode.commands.executeCommand(focusCmd);
-          await new Promise((r) => setTimeout(r, 180));
-          if (process.platform === 'win32') {
-            await execFileAsync(
-              'powershell',
-              ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', "$ws = New-Object -ComObject WScript.Shell; $ws.SendKeys('^v')"],
-              { timeout: 3000, windowsHide: true },
-            );
-            pasted = true;
-          } else {
-            await vscode.commands.executeCommand('editor.action.clipboardPasteAction');
-            pasted = true;
-          }
-        }
+      } else if (cmds.includes('workbench.action.chat.open')) {
+        await vscode.commands.executeCommand('workbench.action.chat.open', {
+          query: promptText,
+          isPartialQuery: true,
+        });
+        pasted = true;
       }
     } catch {
       // Fallback to clipboard-only notification below.
