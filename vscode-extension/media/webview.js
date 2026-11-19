@@ -532,5 +532,72 @@
     requestDetail(sel.dataset.sid);
   });
 
+  const ctxMenu = document.createElement('div');
+  ctxMenu.className = 'ctx-menu hidden';
+  document.body.appendChild(ctxMenu);
+
+  function closeCtxMenu() {
+    ctxMenu.classList.add('hidden');
+  }
+
+  function findSessionById(sid) {
+    const list = (state.data && Array.isArray(state.data.sessions)) ? state.data.sessions : [];
+    return list.find((s) => s.session_id === sid) || null;
+  }
+
+  function openCtxMenu(x, y, sid) {
+    const s = findSessionById(sid);
+    if (!s) return;
+    const isPinned = state.pinned.has(sid);
+    ctxMenu.innerHTML = `
+      <button type="button" class="ctx-item primary" data-ctx="gemini" data-sid="${esc(sid)}">由 Gemini 控制</button>
+      <div class="ctx-sep"></div>
+      <button type="button" class="ctx-item" data-ctx="detail" data-sid="${esc(sid)}">${state.selectedId === sid ? '收起详情' : '查看详情'}</button>
+      <button type="button" class="ctx-item" data-ctx="copy" data-sid="${esc(sid)}">复制会话 ID</button>
+      <button type="button" class="ctx-item" data-ctx="pin" data-sid="${esc(sid)}">${isPinned ? '取消置顶' : '置顶会话'}</button>
+    `;
+    ctxMenu.classList.remove('hidden');
+    const maxX = Math.max(8, window.innerWidth - 166);
+    const maxY = Math.max(8, window.innerHeight - 140);
+    ctxMenu.style.left = `${Math.min(x, maxX)}px`;
+    ctxMenu.style.top = `${Math.min(y, maxY)}px`;
+  }
+
+  els.tree.addEventListener('contextmenu', (e) => {
+    const row = e.target.closest('.sess-row[data-sid]');
+    if (!row) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openCtxMenu(e.clientX, e.clientY, row.dataset.sid);
+  });
+
+  ctxMenu.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-ctx]');
+    if (!btn) return;
+    const action = btn.dataset.ctx;
+    const sid = btn.dataset.sid;
+    closeCtxMenu();
+
+    if (action === 'gemini') {
+      const s = findSessionById(sid);
+      if (s) vscode.postMessage({ type: 'controlWithGemini', session: s });
+    } else if (action === 'detail') {
+      if (state.selectedId === sid) {
+        state.selectedId = null;
+        render();
+      } else {
+        state.selectedId = sid;
+        requestDetail(sid);
+      }
+    } else if (action === 'copy') {
+      vscode.postMessage({ type: 'copyId', sessionId: sid });
+    } else if (action === 'pin') {
+      vscode.postMessage({ type: 'togglePin', sessionId: sid });
+    }
+  });
+
+  document.addEventListener('click', closeCtxMenu);
+  window.addEventListener('blur', closeCtxMenu);
+
   vscode.postMessage({ type: 'ready' });
 })();

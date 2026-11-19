@@ -188,6 +188,8 @@ class DshSidebarProvider {
         await this._handleSend(msg.sessionId, msg.message, msg.mode);
       } else if (msg.type === 'cancelSession') {
         await this._handleCancel(msg.sessionId);
+      } else if (msg.type === 'controlWithGemini' && msg.session) {
+        await this._handleControlWithGemini(msg.session);
       } else if (msg.type === 'copyId' && typeof msg.sessionId === 'string') {
         await vscode.env.clipboard.writeText(msg.sessionId);
         this._post({ type: 'toast', message: '已复制会话 ID' });
@@ -329,6 +331,54 @@ class DshSidebarProvider {
     } catch (err) {
       this._post({ type: 'toast', message: `停止失败: ${err.message}` });
     }
+  }
+
+  async _handleControlWithGemini(session) {
+    const sid = String(session.session_id || '').trim();
+    if (!sid) return;
+    const title = session.title || '新会话';
+    const cwd = session.cwd || '-';
+    const status = session.running ? 'RUNNING' : 'IDLE';
+    const model = session.model || '-';
+
+    const promptText = [
+      '请接管并控制以下 DeepSeek Harness 会话：',
+      `- 会话ID: ${sid}`,
+      `- 标题: ${title}`,
+      `- 工作目录: ${cwd}`,
+      `- 状态: ${status} | 模型: ${model}`,
+      '',
+      '补充说明：',
+    ].join('\n');
+
+    await vscode.env.clipboard.writeText(promptText);
+
+    // 尝试聚焦 Antigravity / IDE 聊天输入框并自动粘贴
+    let pasted = false;
+    try {
+      const cmds = await vscode.commands.getCommands(true);
+      const focusCandidates = [
+        'antigravity.agentView.focus',
+        'antigravity.chat.focus',
+        'workbench.panel.chat.view.copilot.focus',
+        'workbench.action.chat.open',
+      ];
+      const focusCmd = focusCandidates.find((c) => cmds.includes(c))
+        || cmds.find((c) => /(?:antigravity|cascade|chat).*(?:focus|open)/i.test(c));
+      if (focusCmd) {
+        await vscode.commands.executeCommand(focusCmd);
+        await new Promise((r) => setTimeout(r, 120));
+        await vscode.commands.executeCommand('editor.action.clipboardPasteAction');
+        pasted = true;
+      }
+    } catch {
+      // Fallback to clipboard-only notification below.
+    }
+
+    this._post({
+      type: 'toast',
+      message: pasted ? '已填入聊天框，请补充说明' : '已复制会话信息，Ctrl+V 粘贴到聊天框补充说明',
+    });
   }
 
   _getHtml(webview) {
