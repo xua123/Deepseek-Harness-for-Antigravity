@@ -59,6 +59,7 @@
   function workspaceLabel(cwd) {
     if (!cwd) return '临时';
     const norm = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (/\/default-workspace$/i.test(norm)) return '临时';
     const remoteMatch = norm.match(/remote-workspaces\/([^/]+)(?:\/(.+))?$/i);
     if (remoteMatch) {
       const hostSlug = remoteMatch[1].replace(/-\d+$/, '');

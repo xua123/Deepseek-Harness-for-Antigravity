@@ -123,16 +123,30 @@ function loadSessions(staleSec = 300) {
       const turnOpen = Boolean(approval.turnOpen);
       const pendingCount = pendingEntries.length;
       const isRunning = turnOpen || pendingCount > 0;
+      const turns = Number(stats.turns || 0);
+      const steps = Number(stats.steps || 0);
+
+      // Skip empty draft sessions (never sent a message, no title, not running).
+      if (!title && turns === 0 && steps === 0 && !isRunning) {
+        continue;
+      }
+
+      const fallbackTitle =
+        title ||
+        (typeof (rows.goal || {}).val === 'string' ? rows.goal.val.trim() : '') ||
+        (typeof (rows.titleInput || {}).val === 'string' ? rows.titleInput.val.trim() : '') ||
+        '新会话';
+
       const isStalled = pendingCount > 0 && maxPendingSec >= staleSec;
       const status = isStalled ? 'STALLED' : isRunning ? 'RUNNING' : 'IDLE';
 
       sessions.push({
         session_id: file.slice(0, -'.json'.length),
-        title,
+        title: fallbackTitle,
         cwd,
         model: modelSel.model || '',
-        turns: Number(stats.turns || 0),
-        steps: Number(stats.steps || 0),
+        turns,
+        steps,
         turn_open: turnOpen,
         pending_count: pendingCount,
         max_pending_sec: maxPendingSec,
