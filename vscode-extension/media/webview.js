@@ -2,6 +2,7 @@
   const vscode = acquireVsCodeApi();
 
   const state = {
+    monitoring: true,
     activeOnly: false,
     searchOpen: false,
     query: '',
@@ -16,14 +17,26 @@
 
   const els = {
     liveDot: document.getElementById('live-dot'),
+    pausedLabel: document.getElementById('paused-label'),
     btnSearch: document.getElementById('btn-search'),
     btnFilter: document.getElementById('btn-filter'),
     btnRefresh: document.getElementById('btn-refresh'),
+    btnMonitor: document.getElementById('btn-monitor'),
     searchWrap: document.getElementById('search-wrap'),
     searchInput: document.getElementById('search-input'),
     tree: document.getElementById('tree'),
     toast: document.getElementById('toast'),
   };
+
+  function updateMonitorUi() {
+    const on = state.monitoring;
+    els.liveDot.classList.toggle('paused', !on);
+    els.pausedLabel.classList.toggle('hidden', on);
+    els.btnMonitor.classList.toggle('paused', !on);
+    els.btnMonitor.setAttribute('aria-pressed', String(on));
+    els.btnMonitor.title = on ? '关闭监控' : '开启监控';
+    els.btnMonitor.setAttribute('aria-label', on ? '关闭监控' : '开启监控');
+  }
 
   let toastTimer = null;
   function showToast(msg) {
@@ -326,6 +339,16 @@
   }
 
   function render() {
+    updateMonitorUi();
+    if (!state.monitoring) {
+      els.liveDot.title = '监控已关闭';
+      els.tree.innerHTML = `
+        <div class="empty-state">
+          <div>监控已关闭，已停止后台轮询</div>
+          <button type="button" class="resume-btn" data-action="resume-monitor">开启监控</button>
+        </div>`;
+      return;
+    }
     if (!state.data) {
       els.tree.innerHTML = `<div class="empty-state">正在加载会话…</div>`;
       return;
@@ -358,7 +381,11 @@
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'sessions') {
       state.data = msg.data;
+      if (typeof msg.monitoring === 'boolean') state.monitoring = msg.monitoring;
       if (Array.isArray(msg.pinned)) state.pinned = new Set(msg.pinned);
+      render();
+    } else if (msg.type === 'monitoring') {
+      state.monitoring = Boolean(msg.enabled);
       render();
     } else if (msg.type === 'pinned') {
       state.pinned = new Set(Array.isArray(msg.pinned) ? msg.pinned : []);
@@ -402,6 +429,10 @@
     showToast('已刷新');
   });
 
+  els.btnMonitor.addEventListener('click', () => {
+    vscode.postMessage({ type: 'toggleMonitoring' });
+  });
+
   els.searchInput.addEventListener('input', (e) => {
     state.query = e.target.value || '';
     render();
@@ -411,6 +442,11 @@
     const el = e.target.closest('[data-action]');
     if (!el) return;
     const action = el.dataset.action;
+
+    if (action === 'resume-monitor') {
+      vscode.postMessage({ type: 'toggleMonitoring' });
+      return;
+    }
 
     if (action === 'toggle-cat') {
       const cat = el.dataset.cat;

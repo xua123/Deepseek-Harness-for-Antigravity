@@ -10,6 +10,7 @@ const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
 const SESSION_ID_RE = /^[a-zA-Z0-9_-]{4,128}$/;
 const PIN_KEY = 'dshSessions.pinnedIds';
+const MONITOR_KEY = 'dshSessions.monitoringEnabled';
 const POLL_MS = 4000;
 
 let cachedPython = null;
@@ -208,6 +209,24 @@ class DshSidebarProvider {
     this._timer = null;
   }
 
+  isMonitoringEnabled() {
+    return this._context.globalState.get(MONITOR_KEY, true) !== false;
+  }
+
+  async toggleMonitoring() {
+    const next = !this.isMonitoringEnabled();
+    await this._context.globalState.update(MONITOR_KEY, next);
+    if (next) {
+      this._startPolling();
+      this.pushSessions();
+      this._post({ type: 'toast', message: '已开启自动监控' });
+    } else {
+      this._stopPolling();
+      this._post({ type: 'monitoring', enabled: false });
+      this._post({ type: 'toast', message: '已关闭自动监控' });
+    }
+  }
+
   resolveWebviewView(webviewView) {
     this._view = webviewView;
     const webview = webviewView.webview;
@@ -221,8 +240,17 @@ class DshSidebarProvider {
 
     webview.onDidReceiveMessage(async (msg) => {
       if (!msg || typeof msg !== 'object') return;
-      if (msg.type === 'ready' || msg.type === 'refresh') {
+      if (msg.type === 'ready') {
+        const enabled = this.isMonitoringEnabled();
+        this._post({ type: 'monitoring', enabled });
+        if (enabled) {
+          this.pushSessions();
+          this._startPolling();
+        }
+      } else if (msg.type === 'refresh') {
         this.pushSessions();
+      } else if (msg.type === 'toggleMonitoring') {
+        await this.toggleMonitoring();
       } else if (msg.type === 'detail') {
         await this._handleDetail(msg.sessionId, msg.steps);
       } else if (msg.type === 'copyId' && typeof msg.sessionId === 'string') {
@@ -240,7 +268,7 @@ class DshSidebarProvider {
     });
 
     webviewView.onDidChangeVisibility(() => {
-      if (webviewView.visible) {
+      if (webviewView.visible && this.isMonitoringEnabled()) {
         this.pushSessions();
         this._startPolling();
       } else {
@@ -253,13 +281,15 @@ class DshSidebarProvider {
       this._view = null;
     });
 
-    this._startPolling();
+    if (this.isMonitoringEnabled()) {
+      this._startPolling();
+    }
   }
 
   _startPolling() {
-    if (this._timer) return;
+    if (this._timer || !this.isMonitoringEnabled()) return;
     this._timer = setInterval(() => {
-      if (this._view && this._view.visible) {
+      if (this._view && this._view.visible && this.isMonitoringEnabled()) {
         this.pushSessions();
       }
     }, POLL_MS);
@@ -282,7 +312,12 @@ class DshSidebarProvider {
     const { dshDir, staleSec } = getConfig();
     const data = loadSessions(dshDir, staleSec);
     const pinned = this._context.globalState.get(PIN_KEY, []);
-    this._post({ type: 'sessions', data, pinned: Array.isArray(pinned) ? pinned : [] });
+    this._post({
+      type: 'sessions',
+      data,
+      pinned: Array.isArray(pinned) ? pinned : [],
+      monitoring: this.isMonitoringEnabled(),
+    });
   }
 
   async _handleDetail(sessionId, steps) {
@@ -333,6 +368,7 @@ class DshSidebarProvider {
       <div class="topbar-left">
         <span class="section-title">工作区</span>
         <span id="live-dot" class="live-indicator" title="每 4 秒自动刷新"></span>
+        <span id="paused-label" class="paused-label hidden">已关闭</span>
       </div>
       <div class="topbar-actions">
         <button id="btn-search" type="button" class="icon-btn" title="搜索会话" aria-label="搜索会话">
@@ -353,6 +389,12 @@ class DshSidebarProvider {
           <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.7"></path>
             <path d="M13.5 2.5v2.8h-2.8"></path>
+          </svg>
+        </button>
+        <button id="btn-monitor" type="button" class="icon-btn" title="关闭监控" aria-label="关闭监控" aria-pressed="true">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <path d="M8 2.3v4.7"></path>
+            <path d="M4.6 4.4a5.2 5.2 0 1 0 6.8 0"></path>
           </svg>
         </button>
       </div>
@@ -379,6 +421,7 @@ function activate(context) {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     vscode.commands.registerCommand('dshSessions.refresh', () => provider.pushSessions()),
+    vscode.commands.registerCommand('dshSessions.toggleMonitoring', () => provider.toggleMonitoring()),
   );
 }
 

@@ -14,6 +14,7 @@
       <div class="topbar-left">
         <span class="section-title">工作区</span>
         <span id="live-dot" class="live-indicator" title="每 4 秒自动刷新"></span>
+        <span id="paused-label" class="paused-label hidden">已关闭</span>
       </div>
       <div class="topbar-actions">
         <button id="btn-search" type="button" class="icon-btn" title="搜索会话" aria-label="搜索会话">
@@ -34,6 +35,12 @@
           <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.7"></path>
             <path d="M13.5 2.5v2.8h-2.8"></path>
+          </svg>
+        </button>
+        <button id="btn-monitor" type="button" class="icon-btn" title="关闭监控" aria-label="关闭监控" aria-pressed="true">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <path d="M8 2.3v4.7"></path>
+            <path d="M4.6 4.4a5.2 5.2 0 1 0 6.8 0"></path>
           </svg>
         </button>
       </div>

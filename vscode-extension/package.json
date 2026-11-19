@@ -37,6 +37,10 @@
       {
         "command": "dshSessions.refresh",
         "title": "Refresh DeepSeek Harness Sessions"
+      },
+      {
+        "command": "dshSessions.toggleMonitoring",
+        "title": "Toggle DeepSeek Harness Monitoring"
       }
     ],
     "configuration": {

@@ -91,6 +91,16 @@ html, body {
   background: var(--error);
 }
 
+.live-indicator.paused {
+  background: var(--fg-faint);
+  opacity: 0.6;
+}
+
+.paused-label {
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -120,6 +130,29 @@ html, body {
 
 .icon-btn.active {
   background: var(--active-row);
+  color: var(--accent);
+}
+
+.icon-btn.paused {
+  background: color-mix(in srgb, var(--error) 15%, transparent);
+  color: var(--error);
+}
+
+.resume-btn {
+  margin-top: 10px;
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--hover);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.resume-btn:hover {
+  border-color: var(--accent);
   color: var(--accent);
 }
 

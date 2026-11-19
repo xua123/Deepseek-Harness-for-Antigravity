@@ -1,6 +1,23 @@
 (() => {
   const POLL_MS = 4000;
   const PIN_STORAGE_KEY = 'dsh_monitor_pinned_sessions_v1';
+  const MONITOR_STORAGE_KEY = 'dsh_monitor_enabled_v1';
+
+  function loadMonitoring() {
+    try {
+      return localStorage.getItem(MONITOR_STORAGE_KEY) !== '0';
+    } catch {
+      return true;
+    }
+  }
+
+  function saveMonitoring(enabled) {
+    try {
+      localStorage.setItem(MONITOR_STORAGE_KEY, enabled ? '1' : '0');
+    } catch {
+      // Ignore storage errors.
+    }
+  }
 
   function loadPinned() {
     try {
@@ -20,6 +37,8 @@
   }
 
   const state = {
+    monitoring: loadMonitoring(),
+    pollTimer: null,
     activeOnly: false,
     searchOpen: false,
     query: '',
@@ -34,14 +53,52 @@
 
   const els = {
     liveDot: document.getElementById('live-dot'),
+    pausedLabel: document.getElementById('paused-label'),
     btnSearch: document.getElementById('btn-search'),
     btnFilter: document.getElementById('btn-filter'),
     btnRefresh: document.getElementById('btn-refresh'),
+    btnMonitor: document.getElementById('btn-monitor'),
     searchWrap: document.getElementById('search-wrap'),
     searchInput: document.getElementById('search-input'),
     tree: document.getElementById('tree'),
     toast: document.getElementById('toast'),
   };
+
+  function updateMonitorUi() {
+    const on = state.monitoring;
+    els.liveDot.classList.toggle('paused', !on);
+    els.pausedLabel.classList.toggle('hidden', on);
+    els.btnMonitor.classList.toggle('paused', !on);
+    els.btnMonitor.setAttribute('aria-pressed', String(on));
+    els.btnMonitor.title = on ? '关闭监控' : '开启监控';
+    els.btnMonitor.setAttribute('aria-label', on ? '关闭监控' : '开启监控');
+  }
+
+  function startPolling() {
+    if (state.pollTimer || !state.monitoring) return;
+    state.pollTimer = setInterval(fetchSessions, POLL_MS);
+  }
+
+  function stopPolling() {
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+  }
+
+  function toggleMonitoring() {
+    state.monitoring = !state.monitoring;
+    saveMonitoring(state.monitoring);
+    if (state.monitoring) {
+      startPolling();
+      fetchSessions();
+      showToast('已开启自动监控');
+    } else {
+      stopPolling();
+      showToast('已关闭自动监控');
+    }
+    render();
+  }
 
   function syncThemeFromHost() {
     const bg = getComputedStyle(document.documentElement).getPropertyValue('--background').trim();
@@ -392,6 +449,16 @@
 
   function render() {
     syncThemeFromHost();
+    updateMonitorUi();
+    if (!state.monitoring) {
+      els.liveDot.title = '监控已关闭';
+      els.tree.innerHTML = `
+        <div class="empty-state">
+          <div>监控已关闭，已停止后台轮询</div>
+          <button type="button" class="resume-btn" data-action="resume-monitor">开启监控</button>
+        </div>`;
+      return;
+    }
     if (!state.data) return;
 
     if (!state.data.exists) {
@@ -441,6 +508,10 @@
     showToast('已刷新');
   });
 
+  els.btnMonitor.addEventListener('click', () => {
+    toggleMonitoring();
+  });
+
   els.searchInput.addEventListener('input', (e) => {
     state.query = e.target.value || '';
     render();
@@ -450,6 +521,11 @@
     const el = e.target.closest('[data-action]');
     if (!el) return;
     const action = el.dataset.action;
+
+    if (action === 'resume-monitor') {
+      toggleMonitoring();
+      return;
+    }
 
     if (action === 'toggle-cat') {
       const cat = el.dataset.cat;
@@ -517,6 +593,11 @@
   });
 
   syncThemeFromHost();
-  fetchSessions();
-  setInterval(fetchSessions, POLL_MS);
+  updateMonitorUi();
+  if (state.monitoring) {
+    fetchSessions();
+    startPolling();
+  } else {
+    render();
+  }
 })();
