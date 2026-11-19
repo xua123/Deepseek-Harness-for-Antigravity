@@ -26,6 +26,7 @@
     data: null,
     selectedId: null,
     steps: 6,
+    collapsedCategories: new Set(),
     collapsedWorkspaces: new Set(),
     pinned: loadPinned(),
     details: new Map(),
@@ -304,6 +305,69 @@
     return '';
   }
 
+  function chevronSvg() {
+    return `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4.5 6.2L8 9.8l3.5-3.6"></path>
+    </svg>`;
+  }
+
+  function renderWorkspaceGroup(g) {
+    const collapsed = state.collapsedWorkspaces.has(g.key);
+    const rowsHtml = collapsed ? '' : g.sessions.map((s) => {
+      const selected = state.selectedId === s.session_id;
+      const isPinned = state.pinned.has(s.session_id);
+      const cls = [
+        'sess-row',
+        selected ? 'selected' : '',
+        s.status === 'RUNNING' ? 'is-running' : '',
+        s.status === 'STALLED' ? 'is-stalled' : '',
+      ].filter(Boolean).join(' ');
+
+      return `
+        <div class="${cls}" data-action="toggle-session" data-sid="${esc(s.session_id)}" title="${esc(s.title || s.session_id)}">
+          <span class="sess-indicator">${renderIndicator(s)}</span>
+          <span class="sess-title">${esc(s.title || '(无标题)')}</span>
+          <span class="sess-time">${fmtRel(s.mtime_ms)}</span>
+          <span class="sess-hover-actions">
+            <button type="button" class="row-btn" data-action="toggle-session" data-sid="${esc(s.session_id)}" title="查看轨迹与巡检">${moreSvg()}</button>
+            <button type="button" class="row-btn" data-action="copy-id" data-sid="${esc(s.session_id)}" title="复制会话 ID">${copySvg()}</button>
+            <button type="button" class="row-btn ${isPinned ? 'pinned' : ''}" data-action="pin" data-sid="${esc(s.session_id)}" title="${isPinned ? '取消置顶' : '置顶'}">${pinSvg()}</button>
+          </span>
+        </div>
+        ${selected ? renderDetail(s) : ''}`;
+    }).join('');
+
+    return `
+      <section class="ws-group ${g.hasActive ? 'has-active' : ''}">
+        <div class="ws-row" data-action="toggle-ws" data-ws="${esc(g.key)}" title="${esc(g.cwd || g.label)}">
+          <span class="ws-icon">${folderSvg()}</span>
+          <span class="ws-name">${esc(g.label)}</span>
+          <span class="ws-count">${g.sessions.length}</span>
+        </div>
+        <div class="ws-children">${rowsHtml}</div>
+      </section>`;
+  }
+
+  function renderCategory(id, title, dotClass, groups, emptyText) {
+    const collapsed = state.collapsedCategories.has(id);
+    const bodyHtml = collapsed
+      ? ''
+      : groups.length === 0
+        ? `<div class="cat-empty">${emptyText}</div>`
+        : groups.map(renderWorkspaceGroup).join('');
+
+    return `
+      <div class="cat-section ${collapsed ? 'collapsed' : ''}">
+        <div class="cat-header" data-action="toggle-cat" data-cat="${id}">
+          <span class="cat-chevron">${chevronSvg()}</span>
+          <span class="cat-dot ${dotClass}"></span>
+          <span class="cat-title">${title}</span>
+          <span class="cat-count">${groups.length}</span>
+        </div>
+        ${bodyHtml}
+      </div>`;
+  }
+
   function render() {
     syncThemeFromHost();
     if (!state.data) return;
@@ -319,42 +383,16 @@
       return;
     }
 
-    els.tree.innerHTML = groups.map((g) => {
-      const collapsed = state.collapsedWorkspaces.has(g.key);
-      const rowsHtml = collapsed ? '' : g.sessions.map((s) => {
-        const selected = state.selectedId === s.session_id;
-        const isPinned = state.pinned.has(s.session_id);
-        const cls = [
-          'sess-row',
-          selected ? 'selected' : '',
-          s.status === 'RUNNING' ? 'is-running' : '',
-          s.status === 'STALLED' ? 'is-stalled' : '',
-        ].filter(Boolean).join(' ');
+    const workingGroups = groups.filter((g) => g.hasActive);
+    const stoppedGroups = groups.filter((g) => !g.hasActive);
 
-        return `
-          <div class="${cls}" data-action="toggle-session" data-sid="${esc(s.session_id)}" title="${esc(s.title || s.session_id)}">
-            <span class="sess-indicator">${renderIndicator(s)}</span>
-            <span class="sess-title">${esc(s.title || '(无标题)')}</span>
-            <span class="sess-time">${fmtRel(s.mtime_ms)}</span>
-            <span class="sess-hover-actions">
-              <button type="button" class="row-btn" data-action="toggle-session" data-sid="${esc(s.session_id)}" title="查看轨迹与巡检">${moreSvg()}</button>
-              <button type="button" class="row-btn" data-action="copy-id" data-sid="${esc(s.session_id)}" title="复制会话 ID">${copySvg()}</button>
-              <button type="button" class="row-btn ${isPinned ? 'pinned' : ''}" data-action="pin" data-sid="${esc(s.session_id)}" title="${isPinned ? '取消置顶' : '置顶'}">${pinSvg()}</button>
-            </span>
-          </div>
-          ${selected ? renderDetail(s) : ''}`;
-      }).join('');
-
-      return `
-        <section class="ws-group ${g.hasActive ? 'has-active' : ''}">
-          <div class="ws-row" data-action="toggle-ws" data-ws="${esc(g.key)}" title="${esc(g.cwd || g.label)}">
-            <span class="ws-icon">${folderSvg()}</span>
-            <span class="ws-name">${esc(g.label)}</span>
-            <span class="ws-count">${g.sessions.length}</span>
-          </div>
-          <div class="ws-children">${rowsHtml}</div>
-        </section>`;
-    }).join('');
+    const sections = [
+      renderCategory('working', '工作目录', 'active', workingGroups, '暂无运行中的目录'),
+    ];
+    if (!state.activeOnly) {
+      sections.push(renderCategory('stopped', '停止目录', 'stopped', stoppedGroups, '暂无已停止的目录'));
+    }
+    els.tree.innerHTML = sections.join('');
   }
 
   els.btnSearch.addEventListener('click', () => {
@@ -393,6 +431,14 @@
     const el = e.target.closest('[data-action]');
     if (!el) return;
     const action = el.dataset.action;
+
+    if (action === 'toggle-cat') {
+      const cat = el.dataset.cat;
+      if (state.collapsedCategories.has(cat)) state.collapsedCategories.delete(cat);
+      else state.collapsedCategories.add(cat);
+      render();
+      return;
+    }
 
     if (action === 'toggle-ws') {
       const key = el.dataset.ws;
