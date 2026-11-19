@@ -1,0 +1,63 @@
+{
+  "name": "dsh-sessions-sidebar",
+  "displayName": "DeepSeek Harness Sessions",
+  "description": "Display and monitor local DeepSeek Harness (.dsh) sessions in the left Activity Bar sidebar.",
+  "version": "1.0.0",
+  "publisher": "xua123",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:dshSessions.sidebarView"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dsh-sessions-container",
+          "title": "DeepSeek Harness",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dsh-sessions-container": [
+        {
+          "type": "webview",
+          "id": "dshSessions.sidebarView",
+          "name": "工作区"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "dshSessions.refresh",
+        "title": "Refresh DeepSeek Harness Sessions"
+      }
+    ],
+    "configuration": {
+      "title": "DeepSeek Harness Sessions",
+      "properties": {
+        "dshSessions.dshDir": {
+          "type": "string",
+          "default": "",
+          "description": "Optional custom path to .dsh directory (defaults to ~/.dsh)."
+        },
+        "dshSessions.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Python executable with zstandard installed for reading trajectories."
+        },
+        "dshSessions.staleSec": {
+          "type": "number",
+          "default": 300,
+          "description": "Seconds before a pending tool call is marked as stalled."
+        }
+      }
+    }
+  }
+}

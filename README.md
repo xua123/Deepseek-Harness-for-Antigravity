@@ -21,7 +21,14 @@ An Antigravity plugin (Skill + Auxiliary Pane UI Sidecar) for monitoring local *
 dsh-monitor/
 ├── plugin.json
 ├── README.md
-├── sidecars/
+├── vscode-extension/       # Native Left Activity Bar extension for Antigravity IDE / VS Code
+│   ├── package.json
+│   ├── extension.js
+│   └── media/
+│       ├── icon.svg
+│       ├── styles.css
+│       └── webview.js
+├── sidecars/               # Auxiliary Pane UI Sidecar for Antigravity 2.0
 │   └── dsh_sessions/
 │       ├── sidecar.json
 │       ├── package.json
@@ -38,7 +45,9 @@ dsh-monitor/
 
 ## Installation
 
-1. Clone or copy this repository into your Antigravity global plugins directory:
+### A. Antigravity Plugin (Skill + Auxiliary Pane Sidecar)
+
+1. Clone this repository into your Antigravity global plugins directory:
    ```bash
    git clone https://github.com/xua123/Deepseek-Harness-for-Antigravity.git ~/.gemini/config/plugins/dsh-monitor
    ```
@@ -46,12 +55,27 @@ dsh-monitor/
    ```powershell
    git clone https://github.com/xua123/Deepseek-Harness-for-Antigravity.git "$env:USERPROFILE\.gemini\config\plugins\dsh-monitor"
    ```
-2. Install the optional Python dependency `zstandard` (required for reading compressed `session.v4.jsonl.zstd` trajectories; session list works with Node.js alone):
-   ```bash
-   pip install zstandard
-   ```
-   If `zstandard` is installed in a specific virtual/conda environment, either let the sidecar auto-detect it or set `DSH_MONITOR_PYTHON` to that Python executable path.
-3. Open **DSH Sessions** from Antigravity's conversation `+` menu (Auxiliary Pane) or invoke `/dsh-monitor` in chat.
+
+### B. Left Activity Bar Sidebar Extension (Antigravity IDE / VS Code)
+
+Copy `vscode-extension/` into your IDE extensions directory and reload the window (`Ctrl+Shift+P` -> `Developer: Reload Window`):
+
+- Windows (PowerShell):
+  ```powershell
+  Copy-Item "$env:USERPROFILE\.gemini\config\plugins\dsh-monitor\vscode-extension" "$env:USERPROFILE\.antigravity-ide\extensions\xua123.dsh-sessions-sidebar-1.0.0" -Recurse -Force
+  ```
+- macOS / Linux:
+  ```bash
+  cp -r ~/.gemini/config/plugins/dsh-monitor/vscode-extension ~/.antigravity-ide/extensions/xua123.dsh-sessions-sidebar-1.0.0
+  ```
+
+### Optional Dependency
+
+Install Python `zstandard` (required for reading compressed `session.v4.jsonl.zstd` trajectories; session list works with Node.js alone):
+```bash
+pip install zstandard
+```
+If `zstandard` is installed in a specific virtual/conda environment, either let the plugin auto-detect it or set `DSH_MONITOR_PYTHON` (or IDE setting `dshSessions.pythonPath`).
 
 ## Environment Variables (Optional)
 
