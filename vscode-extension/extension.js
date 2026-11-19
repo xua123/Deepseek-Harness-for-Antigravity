@@ -353,23 +353,47 @@ class DshSidebarProvider {
 
     await vscode.env.clipboard.writeText(promptText);
 
-    // 尝试聚焦 Antigravity / IDE 聊天输入框并自动粘贴
+    // 尝试自动填入 Antigravity / IDE 聊天输入框（优先原生命令带入，否则聚焦后系统级 Ctrl+V 粘贴）
     let pasted = false;
     try {
       const cmds = await vscode.commands.getCommands(true);
-      const focusCandidates = [
-        'antigravity.agentView.focus',
-        'antigravity.chat.focus',
-        'workbench.panel.chat.view.copilot.focus',
-        'workbench.action.chat.open',
-      ];
-      const focusCmd = focusCandidates.find((c) => cmds.includes(c))
-        || cmds.find((c) => /(?:antigravity|cascade|chat).*(?:focus|open)/i.test(c));
-      if (focusCmd) {
-        await vscode.commands.executeCommand(focusCmd);
-        await new Promise((r) => setTimeout(r, 120));
-        await vscode.commands.executeCommand('editor.action.clipboardPasteAction');
-        pasted = true;
+      if (cmds.includes('workbench.action.chat.open')) {
+        try {
+          await vscode.commands.executeCommand('workbench.action.chat.open', {
+            query: promptText,
+            isPartialQuery: true,
+          });
+          pasted = true;
+        } catch {
+          // Ignore and try focus + paste fallback.
+        }
+      }
+
+      if (!pasted) {
+        const focusCandidates = [
+          'antigravity.agentView.focus',
+          'antigravity.chat.focus',
+          'antigravity.prioritized.chat.open',
+          'workbench.panel.chat.view.copilot.focus',
+          'workbench.action.chat.open',
+        ];
+        const focusCmd = focusCandidates.find((c) => cmds.includes(c))
+          || cmds.find((c) => /(?:antigravity|cascade|chat).*(?:focus|open)/i.test(c));
+        if (focusCmd) {
+          await vscode.commands.executeCommand(focusCmd);
+          await new Promise((r) => setTimeout(r, 180));
+          if (process.platform === 'win32') {
+            await execFileAsync(
+              'powershell',
+              ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', "$ws = New-Object -ComObject WScript.Shell; $ws.SendKeys('^v')"],
+              { timeout: 3000, windowsHide: true },
+            );
+            pasted = true;
+          } else {
+            await vscode.commands.executeCommand('editor.action.clipboardPasteAction');
+            pasted = true;
+          }
+        }
       }
     } catch {
       // Fallback to clipboard-only notification below.
@@ -377,7 +401,7 @@ class DshSidebarProvider {
 
     this._post({
       type: 'toast',
-      message: pasted ? '已填入聊天框，请补充说明' : '已复制会话信息，Ctrl+V 粘贴到聊天框补充说明',
+      message: pasted ? '已自动填入聊天框，请补充说明' : '已复制会话信息，Ctrl+V 粘贴到聊天框补充说明',
     });
   }
 
