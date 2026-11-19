@@ -4,7 +4,7 @@ const vscode = require('vscode');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFile, execFileSync } = require('node:child_process');
+const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 
 const execFileAsync = promisify(execFile);
@@ -13,193 +13,124 @@ const PIN_KEY = 'dshSessions.pinnedIds';
 const MONITOR_KEY = 'dshSessions.monitoringEnabled';
 const POLL_MS = 4000;
 
-let cachedPython = null;
-let pythonChecked = false;
-
-function getConfig() {
-  const cfg = vscode.workspace.getConfiguration('dshSessions');
-  const dshDir = (cfg.get('dshDir') || process.env.DSH_DIR || path.join(os.homedir(), '.dsh')).trim();
-  const pythonPath = (cfg.get('pythonPath') || process.env.DSH_MONITOR_PYTHON || '').trim();
-  const staleSec = Math.max(30, Number(cfg.get('staleSec') || 300));
-  return { dshDir, pythonPath, staleSec };
+function findNodeBin() {
+  const winNode = 'C:\\Program Files\\nodejs\\node.exe';
+  if (process.platform === 'win32' && fs.existsSync(winNode)) return winNode;
+  return 'node';
 }
 
-function findMonitorScript(extensionPath) {
-  const candidates = [
-    path.resolve(extensionPath, '..', 'skills', 'dsh-monitor', 'scripts', 'dsh_monitor.py'),
-    path.join(os.homedir(), '.gemini', 'config', 'plugins', 'dsh-monitor', 'skills', 'dsh-monitor', 'scripts', 'dsh_monitor.py'),
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
+function findBatonCli() {
+  const fromEnv = (process.env.DSH_BATON_CLI || '').trim();
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+  const def = path.join(os.homedir(), '.dsh-baton', 'app', 'src', 'cli.mjs');
+  return fs.existsSync(def) ? def : null;
+}
+
+async function runBaton(args, { timeout = 15000, stdinText = null } = {}) {
+  const cli = findBatonCli();
+  if (!cli) {
+    throw new Error('未找到 dsh-baton CLI (~/.dsh-baton/app/src/cli.mjs)');
   }
-  return null;
-}
+  const nodeBin = findNodeBin();
+  const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
 
-function testPythonWithZstd(candidate) {
-  try {
-    execFileSync(candidate, ['-c', 'import zstandard'], {
-      stdio: 'ignore',
-      timeout: 3000,
-      windowsHide: true,
+  if (stdinText !== null) {
+    return new Promise((resolve, reject) => {
+      const child = execFile(
+        nodeBin,
+        [cli, ...args],
+        { timeout, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env },
+        (err, stdout, stderr) => {
+          if (err) {
+            reject(new Error((stderr || err.message || String(err)).trim().slice(0, 400)));
+            return;
+          }
+          try {
+            const out = String(stdout || '').trim();
+            resolve(out ? JSON.parse(out) : null);
+          } catch (e) {
+            reject(new Error(`解析 dsh-baton 输出失败: ${e.message}`));
+          }
+        },
+      );
+      if (child.stdin) {
+        child.stdin.write(stdinText);
+        child.stdin.end();
+      }
     });
-    return true;
-  } catch {
-    return false;
   }
+
+  const { stdout } = await execFileAsync(nodeBin, [cli, ...args], {
+    timeout,
+    maxBuffer: 4 * 1024 * 1024,
+    windowsHide: true,
+    env,
+  });
+  const out = String(stdout || '').trim();
+  return out ? JSON.parse(out) : null;
 }
 
-function findPythonWithZstd(configuredPath) {
-  if (configuredPath) {
-    if (testPythonWithZstd(configuredPath)) return configuredPath;
+async function fetchBatonOverview() {
+  const cli = findBatonCli();
+  if (!cli) {
+    return {
+      exists: false,
+      error: '未检测到 dsh-baton (~/.dsh-baton/app/src/cli.mjs)，请先在 DeepSeek Harness 中启用 dsh-baton-host 插件。',
+      updatedAt: Date.now(),
+      totalCount: 0,
+      runningCount: 0,
+      workspaces: [],
+      sessions: [],
+    };
   }
-  if (pythonChecked) return cachedPython;
-  pythonChecked = true;
 
-  const candidates = ['python', 'python3'];
-  const home = os.homedir();
-  const isWin = process.platform === 'win32';
+  const [workspacesRaw, sessionsRaw] = await Promise.all([
+    runBaton(['workspaces']).catch(() => []),
+    runBaton(['sessions', '--limit', '200']),
+  ]);
 
-  for (const base of ['anaconda3', 'miniconda3', 'mambaforge', 'miniforge3']) {
-    const envsDir = path.join(home, base, 'envs');
-    if (!fs.existsSync(envsDir)) continue;
-    try {
-      for (const entry of fs.readdirSync(envsDir, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
-        const py = isWin
-          ? path.join(envsDir, entry.name, 'python.exe')
-          : path.join(envsDir, entry.name, 'bin', 'python');
-        if (fs.existsSync(py)) candidates.push(py);
-      }
-    } catch {
-      // Ignore unreadable directories.
+  const workspaces = Array.isArray(workspacesRaw) ? workspacesRaw : [];
+  const wsTitleByPath = new Map();
+  for (const w of workspaces) {
+    if (w && w.path) {
+      wsTitleByPath.set(String(w.path).toLowerCase(), w.title || '');
     }
   }
 
-  const seen = new Set();
-  for (const c of candidates) {
-    if (!c || seen.has(c)) continue;
-    seen.add(c);
-    if (testPythonWithZstd(c)) {
-      cachedPython = c;
-      return cachedPython;
-    }
-  }
-  return null;
-}
-
-function loadSessions(dshDir, staleSec) {
-  const dir = path.join(dshDir, 'storages', 'session_projcache', 'sessions');
-  if (!fs.existsSync(dir)) {
-    return { dshDir, exists: false, updatedAt: Date.now(), totalCount: 0, runningCount: 0, stalledCount: 0, sessions: [] };
-  }
-
-  let files = [];
-  try {
-    files = fs.readdirSync(dir).filter((f) => f.startsWith('session-') && f.endsWith('.json'));
-  } catch {
-    return { dshDir, exists: false, updatedAt: Date.now(), totalCount: 0, runningCount: 0, stalledCount: 0, sessions: [] };
-  }
-
-  const nowMs = Date.now();
+  const rawList = Array.isArray(sessionsRaw) ? sessionsRaw : [];
   const sessions = [];
-
-  for (const file of files) {
-    const fullPath = path.join(dir, file);
-    try {
-      const stat = fs.statSync(fullPath);
-      const data = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
-      const rec = data.record || {};
-      const rows = rec.rows || {};
-      const identity = rec.identity || {};
-      const stats = (rows.sessionStats || {}).val || {};
-      const approval = (rows.approvalState || {}).val || {};
-      const title = (rows.title || {}).val || '';
-      const cwd = (rows.workingDirectory || {}).val || identity.cwd || '';
-      const modelSel = ((rows.modelSelection || {}).val || {}).lastUsed || {};
-      const timeCtx = (rows.timeContext || {}).val || {};
-      const pendingCalls = stats.pendingCalls || {};
-      const pendingEntries = Object.entries(pendingCalls);
-
-      let maxPendingSec = 0;
-      for (const [, startedMs] of pendingEntries) {
-        const elapsed = Math.max(0, Math.floor((nowMs - Number(startedMs || 0)) / 1000));
-        if (elapsed > maxPendingSec) maxPendingSec = elapsed;
-      }
-
-      const turnOpen = Boolean(approval.turnOpen);
-      const pendingCount = pendingEntries.length;
-      const isRunning = turnOpen || pendingCount > 0;
-      const turns = Number(stats.turns || 0);
-      const steps = Number(stats.steps || 0);
-
-      // Skip empty draft sessions (never sent a message, no title, not running).
-      if (!title && turns === 0 && steps === 0 && !isRunning) {
-        continue;
-      }
-
-      const fallbackTitle =
-        title ||
-        (typeof (rows.goal || {}).val === 'string' ? rows.goal.val.trim() : '') ||
-        (typeof (rows.titleInput || {}).val === 'string' ? rows.titleInput.val.trim() : '') ||
-        '新会话';
-
-      const isStalled = pendingCount > 0 && maxPendingSec >= staleSec;
-      const status = isStalled ? 'STALLED' : isRunning ? 'RUNNING' : 'IDLE';
-
-      sessions.push({
-        session_id: file.slice(0, -'.json'.length),
-        title: fallbackTitle,
-        cwd,
-        model: modelSel.model || '',
-        turns,
-        steps,
-        turn_open: turnOpen,
-        pending_count: pendingCount,
-        max_pending_sec: maxPendingSec,
-        status,
-        last_msg_ts: Number(timeCtx.lastMessageTime || 0),
-        mtime_ms: Math.floor(stat.mtimeMs),
-      });
-    } catch {
-      // Skip unreadable snapshot files.
-    }
+  for (const s of rawList) {
+    if (!s || s.blank) continue;
+    const cwd = s.cwd || '';
+    const isRunning = Boolean(s.running);
+    const updatedMs = s.updated_at ? Date.parse(s.updated_at) || 0 : 0;
+    const modelObj = s.model && typeof s.model === 'object' ? s.model : {};
+    sessions.push({
+      session_id: s.session_id,
+      title: s.title || '新会话',
+      cwd,
+      workspace_title: wsTitleByPath.get(cwd.toLowerCase()) || '',
+      model: modelObj.model || '',
+      status: isRunning ? 'RUNNING' : 'IDLE',
+      running: isRunning,
+      bridge_runs: Array.isArray(s.bridge_runs) ? s.bridge_runs : [],
+      mtime_ms: updatedMs,
+      updated_at: s.updated_at || '',
+    });
   }
 
   sessions.sort((a, b) => b.mtime_ms - a.mtime_ms);
-  const runningCount = sessions.filter((s) => s.status === 'RUNNING' || s.status === 'STALLED').length;
-  const stalledCount = sessions.filter((s) => s.status === 'STALLED').length;
+  const runningCount = sessions.filter((s) => s.running).length;
 
   return {
-    dshDir,
     exists: true,
-    updatedAt: nowMs,
+    error: null,
+    updatedAt: Date.now(),
     totalCount: sessions.length,
     runningCount,
-    stalledCount,
-    sessions: sessions.slice(0, 150),
+    workspaces,
+    sessions,
   };
-}
-
-async function runMonitorJson(extensionPath, dshDir, configuredPython, subcmd, extraArgs) {
-  const script = findMonitorScript(extensionPath);
-  if (!script) {
-    return { ok: false, error: '未找到 dsh_monitor.py 脚本。请确认 dsh-monitor 插件已安装。' };
-  }
-  const py = findPythonWithZstd(configuredPython);
-  if (!py) {
-    return { ok: false, error: '未找到已安装 zstandard 的 Python 环境，可在设置 dshSessions.pythonPath 中指定。' };
-  }
-  try {
-    const { stdout } = await execFileAsync(
-      py,
-      [script, '--dsh-dir', dshDir, subcmd, ...extraArgs, '--json'],
-      { timeout: 15000, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
-    );
-    return { ok: true, data: JSON.parse(stdout) };
-  } catch (err) {
-    const msg = (err && (err.stderr || err.message)) ? String(err.stderr || err.message).trim() : String(err);
-    return { ok: false, error: msg.slice(0, 400) };
-  }
 }
 
 class DshSidebarProvider {
@@ -218,7 +149,7 @@ class DshSidebarProvider {
     await this._context.globalState.update(MONITOR_KEY, next);
     if (next) {
       this._startPolling();
-      this.pushSessions();
+      await this.pushSessions();
       this._post({ type: 'toast', message: '已开启自动监控' });
     } else {
       this._stopPolling();
@@ -244,15 +175,19 @@ class DshSidebarProvider {
         const enabled = this.isMonitoringEnabled();
         this._post({ type: 'monitoring', enabled });
         if (enabled) {
-          this.pushSessions();
+          await this.pushSessions();
           this._startPolling();
         }
       } else if (msg.type === 'refresh') {
-        this.pushSessions();
+        await this.pushSessions();
       } else if (msg.type === 'toggleMonitoring') {
         await this.toggleMonitoring();
       } else if (msg.type === 'detail') {
-        await this._handleDetail(msg.sessionId, msg.steps);
+        await this._handleDetail(msg.sessionId, msg.last);
+      } else if (msg.type === 'sendMessage') {
+        await this._handleSend(msg.sessionId, msg.message, msg.mode);
+      } else if (msg.type === 'cancelSession') {
+        await this._handleCancel(msg.sessionId);
       } else if (msg.type === 'copyId' && typeof msg.sessionId === 'string') {
         await vscode.env.clipboard.writeText(msg.sessionId);
         this._post({ type: 'toast', message: '已复制会话 ID' });
@@ -308,44 +243,92 @@ class DshSidebarProvider {
     }
   }
 
-  pushSessions() {
-    const { dshDir, staleSec } = getConfig();
-    const data = loadSessions(dshDir, staleSec);
-    const pinned = this._context.globalState.get(PIN_KEY, []);
-    this._post({
-      type: 'sessions',
-      data,
-      pinned: Array.isArray(pinned) ? pinned : [],
-      monitoring: this.isMonitoringEnabled(),
-    });
+  async pushSessions() {
+    try {
+      const data = await fetchBatonOverview();
+      const pinned = this._context.globalState.get(PIN_KEY, []);
+      this._post({
+        type: 'sessions',
+        data,
+        pinned: Array.isArray(pinned) ? pinned : [],
+        monitoring: this.isMonitoringEnabled(),
+      });
+    } catch (err) {
+      this._post({
+        type: 'sessions',
+        data: {
+          exists: false,
+          error: err.message || String(err),
+          updatedAt: Date.now(),
+          totalCount: 0,
+          runningCount: 0,
+          workspaces: [],
+          sessions: [],
+        },
+        monitoring: this.isMonitoringEnabled(),
+      });
+    }
   }
 
-  async _handleDetail(sessionId, steps) {
+  async _handleDetail(sessionId, last) {
     const sid = String(sessionId || '').trim();
     if (!SESSION_ID_RE.test(sid)) {
       this._post({ type: 'detail', sessionId: sid, error: '无效的会话 ID' });
       return;
     }
-    const safeSteps = Math.min(30, Math.max(1, Number(steps) || 6));
-    const { dshDir, pythonPath, staleSec } = getConfig();
-
-    const [stepsRes, inspectRes] = await Promise.all([
-      runMonitorJson(this._context.extensionPath, dshDir, pythonPath, 'steps', ['--session', sid, '--steps', String(safeSteps)]),
-      runMonitorJson(this._context.extensionPath, dshDir, pythonPath, 'inspect', ['--session', sid, '--stale-sec', String(staleSec)]),
-    ]);
-
-    this._post({
-      type: 'detail',
-      sessionId: sid,
-      data: {
+    const safeLast = Math.min(30, Math.max(2, Number(last) || 6));
+    try {
+      const [status, messages] = await Promise.all([
+        runBaton(['status', sid]),
+        runBaton(['read', sid, '--last', String(safeLast)]),
+      ]);
+      this._post({
+        type: 'detail',
         sessionId: sid,
-        steps: safeSteps,
-        plan: stepsRes.ok ? stepsRes.data : null,
-        planError: stepsRes.ok ? null : stepsRes.error,
-        inspect: inspectRes.ok ? inspectRes.data : null,
-        inspectError: inspectRes.ok ? null : inspectRes.error,
-      },
-    });
+        data: { sessionId: sid, last: safeLast, status, messages },
+      });
+    } catch (err) {
+      this._post({
+        type: 'detail',
+        sessionId: sid,
+        error: err.message || String(err),
+      });
+    }
+  }
+
+  async _handleSend(sessionId, message, mode) {
+    const sid = String(sessionId || '').trim();
+    const text = String(message || '').trim();
+    if (!SESSION_ID_RE.test(sid) || !text) {
+      this._post({ type: 'toast', message: '会话 ID 或消息不能为空' });
+      return;
+    }
+    try {
+      const args = ['send', '--session', sid];
+      if (mode === 'steer' || mode === 'followup') {
+        args.push('--mode', mode);
+      }
+      args.push('-');
+      await runBaton(args, { timeout: 20000, stdinText: text });
+      this._post({ type: 'toast', message: '已发送给 DeepSeek Harness' });
+      await this.pushSessions();
+      await this._handleDetail(sid, 6);
+    } catch (err) {
+      this._post({ type: 'toast', message: `发送失败: ${err.message}` });
+    }
+  }
+
+  async _handleCancel(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!SESSION_ID_RE.test(sid)) return;
+    try {
+      await runBaton(['cancel', '--session', sid], { timeout: 15000 });
+      this._post({ type: 'toast', message: '已发送停止指令' });
+      await this.pushSessions();
+      await this._handleDetail(sid, 6);
+    } catch (err) {
+      this._post({ type: 'toast', message: `停止失败: ${err.message}` });
+    }
   }
 
   _getHtml(webview) {
@@ -367,7 +350,7 @@ class DshSidebarProvider {
     <header class="topbar">
       <div class="topbar-left">
         <span class="section-title">工作区</span>
-        <span id="live-dot" class="live-indicator" title="每 4 秒自动刷新"></span>
+        <span id="live-dot" class="live-indicator" title="每 4 秒通过 dsh-baton 自动刷新"></span>
         <span id="paused-label" class="paused-label hidden">已关闭</span>
       </div>
       <div class="topbar-actions">

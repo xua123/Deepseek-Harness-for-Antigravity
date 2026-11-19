@@ -8,11 +8,12 @@
     query: '',
     data: null,
     selectedId: null,
-    steps: 6,
+    lastCount: 8,
     collapsedCategories: new Set(),
     collapsedWorkspaces: new Set(),
     pinned: new Set(),
     details: new Map(),
+    drafts: new Map(), // sessionId -> draft message
   };
 
   const els = {
@@ -63,14 +64,9 @@
     return `${Math.floor(diff / 86400)}天`;
   }
 
-  function fmtDuration(sec) {
-    if (sec < 60) return `${sec}s`;
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return s ? `${m}m${s}s` : `${m}m`;
-  }
-
-  function workspaceLabel(cwd) {
+  function workspaceLabel(s) {
+    if (s.workspace_title) return s.workspace_title;
+    const cwd = s.cwd || '';
     if (!cwd) return '临时';
     const norm = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
     if (/\/default-workspace$/i.test(norm)) return '临时';
@@ -113,10 +109,16 @@
     </svg>`;
   }
 
+  function chevronSvg() {
+    return `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4.5 6.2L8 9.8l3.5-3.6"></path>
+    </svg>`;
+  }
+
   function requestDetail(sessionId) {
     state.details.set(sessionId, { loading: true, data: null, error: null });
     render();
-    vscode.postMessage({ type: 'detail', sessionId, steps: state.steps });
+    vscode.postMessage({ type: 'detail', sessionId, last: state.lastCount });
   }
 
   function buildCategorizedGroups() {
@@ -145,10 +147,10 @@
     };
 
     for (const s of state.data.sessions) {
-      const isRunning = s.status === 'RUNNING' || s.status === 'STALLED';
+      const isRunning = Boolean(s.running);
       if (state.activeOnly && !isRunning) continue;
 
-      const wsName = workspaceLabel(s.cwd);
+      const wsName = workspaceLabel(s);
       if (q) {
         const hit =
           wsName.toLowerCase().includes(q) ||
@@ -184,10 +186,7 @@
   }
 
   function renderIndicator(s) {
-    if (s.status === 'STALLED') {
-      return `<span class="dot stalled" title="挂起已超过 ${fmtDuration(s.max_pending_sec)}"></span>`;
-    }
-    if (s.status === 'RUNNING') {
+    if (s.running) {
       return `<span class="spinner" title="运行中"></span>`;
     }
     if (state.pinned.has(s.session_id)) {
@@ -196,61 +195,57 @@
     return '';
   }
 
-  function renderStepStatusIcon(status) {
-    if (status === 'running') return `<span class="eng-icon running" title="执行中">⟳</span>`;
-    if (status === 'error') return `<span class="eng-icon error" title="异常">✕</span>`;
-    return `<span class="eng-icon done" title="已完成">✓</span>`;
+  function summarizeMessage(m) {
+    const text = (m.text || '').trim();
+    if (text) return text.length > 360 ? `${text.slice(0, 360)}…` : text;
+    if (Array.isArray(m.tools) && m.tools.length > 0) {
+      return `调用工具: ${m.tools.join(', ')}`;
+    }
+    return '(空)';
   }
 
   function renderDetail(s) {
     const entry = state.details.get(s.session_id);
-    const pendingTag = s.pending_count > 0
-      ? `<span class="tag ${s.status === 'STALLED' ? 'warn' : ''}">pending ${s.pending_count} (${fmtDuration(s.max_pending_sec)})</span>`
-      : '';
+    const draft = state.drafts.get(s.session_id) || '';
 
     let bodyHtml = '';
     if (!entry || entry.loading) {
-      bodyHtml = `<div style="color:var(--fg-muted);font-size:11.5px;">正在整理工程实现步骤…</div>`;
+      bodyHtml = `<div style="color:var(--fg-muted);font-size:11.5px;">正在通过 dsh-baton 获取状态…</div>`;
     } else if (entry.error) {
       bodyHtml = `<div class="error-msg">${esc(entry.error)}</div>`;
     } else {
       const d = entry.data || {};
-      let inspectHtml = '';
-      if (d.inspectError) {
-        inspectHtml = `<div class="error-msg">${esc(d.inspectError)}</div>`;
-      } else if (d.inspect) {
-        const findings = d.inspect.findings || [];
-        inspectHtml = findings.length === 0
-          ? `<div class="inspect-ok">状态正常 · 无卡死或报错</div>`
-          : findings.slice(0, 3).map((f) => `<div class="finding ${esc(f.level)}"><b>[${esc(f.level)}]</b> ${esc(f.message)}</div>`).join('');
+      const status = d.status || {};
+      const actList = Array.isArray(status.activity) ? status.activity : [];
+      const jobLabels = [];
+      for (const act of actList) {
+        if (act && Array.isArray(act.items)) {
+          for (const it of act.items) {
+            if (it && it.label) jobLabels.push(it.label);
+          }
+        }
       }
 
-      let stepsHtml = '';
-      if (d.planError) {
-        stepsHtml = `<div class="error-msg">${esc(d.planError)}</div>`;
-      } else if (d.plan) {
-        const reqs = d.plan.requirements || [];
-        const latestReq = reqs.length > 0 ? reqs[reqs.length - 1] : null;
-        const reqHtml = latestReq && latestReq.prompt
-          ? `<div class="req-goal"><span class="req-label">当前需求</span><span class="req-text">${esc(latestReq.prompt)}</span></div>`
+      const actHtml = jobLabels.length > 0
+        ? `<div class="baton-act"><span class="eng-icon running">⟳</span><span class="baton-act-text">${esc(jobLabels[0].slice(0, 140))}</span></div>`
+        : status.turn_running
+          ? `<div class="baton-act"><span class="eng-icon running">⟳</span><span class="baton-act-text">正在执行当前轮次…</span></div>`
           : '';
 
-        const items = d.plan.steps || [];
-        const listHtml = items.length === 0
-          ? `<div style="color:var(--fg-muted);font-size:11.5px;">暂无工程实现步骤</div>`
-          : `<ol class="eng-list">${items.map((st, i) => `
-              <li class="eng-step ${esc(st.status || 'done')}">
-                <div class="eng-row">
-                  ${renderStepStatusIcon(st.status)}
-                  <span class="eng-phase">${esc(st.phase || '工程执行')}</span>
-                  <span class="eng-title">${esc(st.title || '')}</span>
-                </div>
-                ${st.note ? `<div class="eng-note">${esc(st.note)}</div>` : ''}
-              </li>`).join('')}</ol>`;
+      const msgs = ((d.messages && Array.isArray(d.messages.messages)) ? d.messages.messages : []).filter(
+        (m) => (m.text && m.text.trim()) || (Array.isArray(m.tools) && m.tools.length > 0),
+      );
+      const msgsHtml = msgs.length === 0
+        ? `<div style="color:var(--fg-muted);font-size:11.5px;">暂无会话消息</div>`
+        : `<ol class="eng-list">${msgs.slice().reverse().map((m) => `
+            <li class="eng-step">
+              <div class="eng-row">
+                <span class="eng-phase">${m.role === 'user' ? '指令' : 'DSH'}</span>
+                <span class="eng-title">${esc(summarizeMessage(m))}</span>
+              </div>
+            </li>`).join('')}</ol>`;
 
-        stepsHtml = `${reqHtml}${listHtml}`;
-      }
-      bodyHtml = `${inspectHtml}${stepsHtml}`;
+      bodyHtml = `${actHtml}${msgsHtml}`;
     }
 
     return `
@@ -258,27 +253,24 @@
         <div class="detail-meta">
           <div class="detail-meta-left">
             ${s.model ? `<span class="tag mono">${esc(s.model)}</span>` : ''}
-            <span>turn ${s.turns} · steps ${s.steps}</span>
-            ${pendingTag}
+            <span>${s.running ? '运行中' : '空闲'}</span>
           </div>
           <div class="detail-controls">
-            <select class="steps-select" data-action="steps" data-sid="${esc(s.session_id)}">
-              <option value="5" ${state.steps === 5 ? 'selected' : ''}>5步</option>
-              <option value="6" ${state.steps === 6 ? 'selected' : ''}>6步</option>
-              <option value="10" ${state.steps === 10 ? 'selected' : ''}>10步</option>
-              <option value="20" ${state.steps === 20 ? 'selected' : ''}>20步</option>
+            <select class="steps-select" data-action="last" data-sid="${esc(s.session_id)}">
+              <option value="4" ${state.lastCount === 4 ? 'selected' : ''}>4条</option>
+              <option value="8" ${state.lastCount === 8 ? 'selected' : ''}>8条</option>
+              <option value="15" ${state.lastCount === 15 ? 'selected' : ''}>15条</option>
             </select>
+            ${s.running ? `<button type="button" class="mini-link danger" data-action="cancel-session" data-sid="${esc(s.session_id)}">中断</button>` : ''}
             <button type="button" class="mini-link" data-action="reload-detail" data-sid="${esc(s.session_id)}">刷新</button>
           </div>
         </div>
         ${bodyHtml}
+        <div class="send-box">
+          <input type="text" class="send-input" data-action="draft-input" data-sid="${esc(s.session_id)}" value="${esc(draft)}" placeholder="${s.running ? '运行中可发送纠偏/排队指令…' : '向该会话发送新指令…'}">
+          <button type="button" class="send-btn" data-action="send-msg" data-sid="${esc(s.session_id)}">发送</button>
+        </div>
       </div>`;
-  }
-
-  function chevronSvg() {
-    return `<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M4.5 6.2L8 9.8l3.5-3.6"></path>
-    </svg>`;
   }
 
   function renderWorkspaceGroup(g) {
@@ -289,17 +281,16 @@
       const cls = [
         'sess-row',
         selected ? 'selected' : '',
-        s.status === 'RUNNING' ? 'is-running' : '',
-        s.status === 'STALLED' ? 'is-stalled' : '',
+        s.running ? 'is-running' : '',
       ].filter(Boolean).join(' ');
 
       return `
         <div class="${cls}" data-action="toggle-session" data-sid="${esc(s.session_id)}" title="${esc(s.title || s.session_id)}">
           <span class="sess-indicator">${renderIndicator(s)}</span>
-          <span class="sess-title">${esc(s.title || '(无标题)')}</span>
+          <span class="sess-title">${esc(s.title || '新会话')}</span>
           <span class="sess-time">${fmtRel(s.mtime_ms)}</span>
           <span class="sess-hover-actions">
-            <button type="button" class="row-btn" data-action="toggle-session" data-sid="${esc(s.session_id)}" title="查看轨迹与巡检">${moreSvg()}</button>
+            <button type="button" class="row-btn" data-action="toggle-session" data-sid="${esc(s.session_id)}" title="查看与发送指令">${moreSvg()}</button>
             <button type="button" class="row-btn" data-action="copy-id" data-sid="${esc(s.session_id)}" title="复制会话 ID">${copySvg()}</button>
             <button type="button" class="row-btn ${isPinned ? 'pinned' : ''}" data-action="pin" data-sid="${esc(s.session_id)}" title="${isPinned ? '取消置顶' : '置顶'}">${pinSvg()}</button>
           </span>
@@ -350,14 +341,14 @@
       return;
     }
     if (!state.data) {
-      els.tree.innerHTML = `<div class="empty-state">正在加载会话…</div>`;
+      els.tree.innerHTML = `<div class="empty-state">正在连接 dsh-baton…</div>`;
       return;
     }
 
-    els.liveDot.title = `每 4 秒自动刷新 · 运行中 ${state.data.runningCount} / 共 ${state.data.totalCount}`;
+    els.liveDot.title = `每 4 秒通过 dsh-baton 刷新 · 运行中 ${state.data.runningCount} / 共 ${state.data.totalCount}`;
 
     if (!state.data.exists) {
-      els.tree.innerHTML = `<div class="empty-state">未找到 DeepSeek Harness 数据目录<br><span class="mono" style="font-size:11px;">${esc(state.data.dshDir)}</span></div>`;
+      els.tree.innerHTML = `<div class="empty-state">${esc(state.data.error || 'dsh-baton 不可用')}</div>`;
       return;
     }
 
@@ -438,10 +429,34 @@
     render();
   });
 
+  els.tree.addEventListener('input', (e) => {
+    const inp = e.target.closest('input[data-action="draft-input"]');
+    if (inp) {
+      state.drafts.set(inp.dataset.sid, inp.value);
+    }
+  });
+
+  els.tree.addEventListener('keydown', (e) => {
+    const inp = e.target.closest('input[data-action="draft-input"]');
+    if (inp && e.key === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      const sid = inp.dataset.sid;
+      const text = (inp.value || '').trim();
+      if (!text) return;
+      state.drafts.set(sid, '');
+      vscode.postMessage({ type: 'sendMessage', sessionId: sid, message: text });
+    }
+  });
+
   els.tree.addEventListener('click', (e) => {
     const el = e.target.closest('[data-action]');
     if (!el) return;
     const action = el.dataset.action;
+
+    if (action === 'draft-input') {
+      e.stopPropagation();
+      return;
+    }
 
     if (action === 'resume-monitor') {
       vscode.postMessage({ type: 'toggleMonitoring' });
@@ -483,6 +498,21 @@
       return;
     }
 
+    if (action === 'cancel-session') {
+      e.stopPropagation();
+      vscode.postMessage({ type: 'cancelSession', sessionId: sid });
+      return;
+    }
+
+    if (action === 'send-msg') {
+      e.stopPropagation();
+      const text = (state.drafts.get(sid) || '').trim();
+      if (!text) return;
+      state.drafts.set(sid, '');
+      vscode.postMessage({ type: 'sendMessage', sessionId: sid, message: text });
+      return;
+    }
+
     if (action === 'toggle-session') {
       e.stopPropagation();
       if (state.selectedId === sid) {
@@ -496,9 +526,9 @@
   });
 
   els.tree.addEventListener('change', (e) => {
-    const sel = e.target.closest('select[data-action="steps"]');
+    const sel = e.target.closest('select[data-action="last"]');
     if (!sel) return;
-    state.steps = Number(sel.value) || 6;
+    state.lastCount = Number(sel.value) || 8;
     requestDetail(sel.dataset.sid);
   });
 
