@@ -1,44 +1,63 @@
 (() => {
   const POLL_MS = 4000;
+  const PIN_STORAGE_KEY = 'dsh_monitor_pinned_sessions_v1';
+
+  function loadPinned() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(PIN_STORAGE_KEY) || '[]');
+      return new Set(Array.isArray(arr) ? arr : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  function savePinned(set) {
+    try {
+      localStorage.setItem(PIN_STORAGE_KEY, JSON.stringify([...set]));
+    } catch {
+      // Ignore storage errors in sandboxed iframes.
+    }
+  }
 
   const state = {
-    filter: 'active', // 'active' | 'all'
+    activeOnly: false,
+    searchOpen: false,
     query: '',
     data: null,
-    expandedId: null,
+    selectedId: null,
     steps: 6,
-    details: new Map(), // sessionId -> { loading, data, error }
-    pollTimer: null,
+    collapsedWorkspaces: new Set(),
+    pinned: loadPinned(),
+    details: new Map(),
   };
 
   const els = {
-    livePill: document.getElementById('live-pill'),
-    liveText: document.getElementById('live-text'),
-    refreshBtn: document.getElementById('refresh-btn'),
-    tabActive: document.getElementById('tab-active'),
-    tabAll: document.getElementById('tab-all'),
-    countActive: document.getElementById('count-active'),
-    countAll: document.getElementById('count-all'),
+    liveDot: document.getElementById('live-dot'),
+    btnSearch: document.getElementById('btn-search'),
+    btnFilter: document.getElementById('btn-filter'),
+    btnRefresh: document.getElementById('btn-refresh'),
+    searchWrap: document.getElementById('search-wrap'),
     searchInput: document.getElementById('search-input'),
-    summaryBar: document.getElementById('summary-bar'),
-    list: document.getElementById('session-list'),
+    tree: document.getElementById('tree'),
     toast: document.getElementById('toast'),
   };
 
   function syncThemeFromHost() {
     const bg = getComputedStyle(document.documentElement).getPropertyValue('--background').trim();
     if (!bg) return;
+    let r = 24, g = 24, b = 24;
     const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
     if (m) {
-      const lum = (0.299 * +m[1] + 0.587 * +m[2] + 0.114 * +m[3]) / 255;
-      document.documentElement.setAttribute('data-theme', lum < 0.5 ? 'dark' : 'light');
+      r = +m[1]; g = +m[2]; b = +m[3];
     } else if (bg.startsWith('#') && bg.length >= 7) {
-      const r = parseInt(bg.slice(1, 3), 16);
-      const g = parseInt(bg.slice(3, 5), 16);
-      const b = parseInt(bg.slice(5, 7), 16);
-      const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-      document.documentElement.setAttribute('data-theme', lum < 0.5 ? 'dark' : 'light');
+      r = parseInt(bg.slice(1, 3), 16);
+      g = parseInt(bg.slice(3, 5), 16);
+      b = parseInt(bg.slice(5, 7), 16);
+    } else {
+      return;
     }
+    const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    document.documentElement.setAttribute('data-theme', lum < 0.5 ? 'dark' : 'light');
   }
 
   let toastTimer = null;
@@ -46,10 +65,10 @@
     els.toast.textContent = msg;
     els.toast.classList.remove('hidden');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => els.toast.classList.add('hidden'), 1800);
+    toastTimer = setTimeout(() => els.toast.classList.add('hidden'), 1600);
   }
 
-  function escapeHtml(str) {
+  function esc(str) {
     return String(str ?? '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
@@ -57,21 +76,13 @@
       .replace(/"/g, '&quot;');
   }
 
-  function fmtRelTime(ms) {
-    if (!ms) return '-';
+  function fmtRel(ms) {
+    if (!ms) return '';
     const diff = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-    if (diff < 10) return '刚刚';
-    if (diff < 60) return `${diff}s 前`;
-    if (diff < 3600) return `${Math.floor(diff / 60)}m 前`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h 前`;
-    return `${Math.floor(diff / 86400)}d 前`;
-  }
-
-  function fmtAbsTime(ms) {
-    if (!ms) return '-';
-    const d = new Date(ms);
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    if (diff < 60) return '刚刚';
+    if (diff < 3600) return `${Math.floor(diff / 60)}分钟`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}小时`;
+    return `${Math.floor(diff / 86400)}天`;
   }
 
   function fmtDuration(sec) {
@@ -81,32 +92,65 @@
     return s ? `${m}m${s}s` : `${m}m`;
   }
 
-  function shortPath(cwd) {
-    if (!cwd) return '-';
-    const parts = cwd.replace(/\\/g, '/').split('/').filter(Boolean);
-    if (parts.length <= 2) return cwd;
-    return `…/${parts.slice(-2).join('/')}`;
+  /**
+   * Convert a raw cwd path into a clean workspace label matching DSH sidebar style.
+   * Examples:
+   *   .../remote-workspaces/172.18.21.163-junhong.pan-22/junhong.pan -> 172.18.21.163-junhong.pan
+   *   C:\Users\...\Desktop\临商银行项目 -> 临商银行项目
+   */
+  function workspaceLabel(cwd) {
+    if (!cwd) return '临时';
+    const norm = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
+    const remoteMatch = norm.match(/remote-workspaces\/([^/]+)(?:\/(.+))?$/i);
+    if (remoteMatch) {
+      const hostSlug = remoteMatch[1].replace(/-\d+$/, '');
+      const sub = remoteMatch[2];
+      if (!sub || hostSlug.endsWith(sub)) return hostSlug;
+      return `${hostSlug}-/${sub}`;
+    }
+    const parts = norm.split('/').filter(Boolean);
+    return parts[parts.length - 1] || cwd;
+  }
+
+  function folderSvg() {
+    return `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round">
+      <path d="M2 4.2A1.2 1.2 0 0 1 3.2 3h3l1.3 1.4h5.3A1.2 1.2 0 0 1 14 5.6v6.2a1.2 1.2 0 0 1-1.2 1.2H3.2A1.2 1.2 0 0 1 2 11.8V4.2z"></path>
+    </svg>`;
+  }
+
+  function copySvg() {
+    return `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round">
+      <rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.2"></rect>
+      <path d="M10.5 5.5V3.8A1.3 1.3 0 0 0 9.2 2.5H3.8A1.3 1.3 0 0 0 2.5 3.8v5.4a1.3 1.3 0 0 0 1.3 1.3h1.7"></path>
+    </svg>`;
+  }
+
+  function pinSvg() {
+    return `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M5.5 3h5l-.8 4 2 2H4.3l2-2-.8-4z"></path>
+      <path d="M8 9v4.5"></path>
+    </svg>`;
+  }
+
+  function moreSvg() {
+    return `<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor">
+      <circle cx="3.5" cy="8" r="1.1"></circle>
+      <circle cx="8" cy="8" r="1.1"></circle>
+      <circle cx="12.5" cy="8" r="1.1"></circle>
+    </svg>`;
   }
 
   async function fetchSessions() {
     try {
-      const res = await fetch('/api/sessions?limit=100&staleSec=300', { cache: 'no-store' });
+      const res = await fetch('/api/sessions?limit=150&staleSec=300', { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      state.data = json;
-      els.livePill.classList.remove('offline');
-      els.liveText.textContent = 'Live';
-
-      // Auto-fallback to "all" on initial load if no active sessions exist.
-      if (state.filter === 'active' && json.runningCount === 0 && !state._userPickedFilter) {
-        state.filter = 'all';
-        updateFilterTabs();
-      }
+      state.data = await res.json();
+      els.liveDot.classList.remove('offline');
+      els.liveDot.title = `每 4 秒自动刷新 · 运行中 ${state.data.runningCount} / 共 ${state.data.totalCount}`;
       render();
     } catch (err) {
-      els.livePill.classList.add('offline');
-      els.liveText.textContent = '离线';
-      els.summaryBar.textContent = `获取会话失败：${err.message}`;
+      els.liveDot.classList.add('offline');
+      els.liveDot.title = `连接失败：${err.message}`;
     }
   }
 
@@ -125,196 +169,218 @@
     render();
   }
 
-  function updateFilterTabs() {
-    const isActive = state.filter === 'active';
-    els.tabActive.classList.toggle('active', isActive);
-    els.tabActive.setAttribute('aria-selected', String(isActive));
-    els.tabAll.classList.toggle('active', !isActive);
-    els.tabAll.setAttribute('aria-selected', String(!isActive));
-  }
-
-  function getVisibleSessions() {
+  function buildGroups() {
     if (!state.data || !Array.isArray(state.data.sessions)) return [];
-    let list = state.data.sessions;
-    if (state.filter === 'active') {
-      list = list.filter((s) => s.status === 'RUNNING' || s.status === 'STALLED');
-    }
     const q = state.query.trim().toLowerCase();
-    if (q) {
-      list = list.filter((s) =>
-        (s.title || '').toLowerCase().includes(q) ||
-        (s.session_id || '').toLowerCase().includes(q) ||
-        (s.cwd || '').toLowerCase().includes(q) ||
-        (s.model || '').toLowerCase().includes(q),
-      );
+    const groupsMap = new Map();
+
+    for (const s of state.data.sessions) {
+      const isRunning = s.status === 'RUNNING' || s.status === 'STALLED';
+      if (state.activeOnly && !isRunning) continue;
+
+      const wsName = workspaceLabel(s.cwd);
+      if (q) {
+        const hit =
+          wsName.toLowerCase().includes(q) ||
+          (s.title || '').toLowerCase().includes(q) ||
+          (s.session_id || '').toLowerCase().includes(q) ||
+          (s.cwd || '').toLowerCase().includes(q) ||
+          (s.model || '').toLowerCase().includes(q);
+        if (!hit) continue;
+      }
+
+      const key = s.cwd || '__temp__';
+      if (!groupsMap.has(key)) {
+        groupsMap.set(key, {
+          key,
+          label: wsName,
+          cwd: s.cwd || '',
+          sessions: [],
+          hasActive: false,
+          latestMtime: 0,
+        });
+      }
+      const g = groupsMap.get(key);
+      g.sessions.push(s);
+      if (isRunning) g.hasActive = true;
+      if (s.mtime_ms > g.latestMtime) g.latestMtime = s.mtime_ms;
     }
-    return list;
+
+    const groups = [...groupsMap.values()];
+    for (const g of groups) {
+      g.sessions.sort((a, b) => {
+        const pa = state.pinned.has(a.session_id) ? 1 : 0;
+        const pb = state.pinned.has(b.session_id) ? 1 : 0;
+        if (pa !== pb) return pb - pa;
+        return b.mtime_ms - a.mtime_ms;
+      });
+    }
+    groups.sort((a, b) => {
+      if (a.hasActive !== b.hasActive) return a.hasActive ? -1 : 1;
+      return b.latestMtime - a.latestMtime;
+    });
+    return groups;
   }
 
-  function renderDetail(sessionId) {
-    const entry = state.details.get(sessionId);
+  function renderDetail(s) {
+    const entry = state.details.get(s.session_id);
+    const pendingTag = s.pending_count > 0
+      ? `<span class="tag ${s.status === 'STALLED' ? 'warn' : ''}">pending ${s.pending_count} (${fmtDuration(s.max_pending_sec)})</span>`
+      : '';
+
+    let bodyHtml = '';
     if (!entry || entry.loading) {
-      return `
-        <div class="detail-panel">
-          <div class="detail-sid mono">${escapeHtml(sessionId)}</div>
-          <div style="color: var(--dsh-fg-muted); font-size: 12px;">正在读取轨迹与巡检结果…</div>
-        </div>`;
-    }
-    if (entry.error) {
-      return `
-        <div class="detail-panel">
-          <div class="detail-sid mono">${escapeHtml(sessionId)}</div>
-          <div class="error-banner">${escapeHtml(entry.error)}</div>
-        </div>`;
-    }
-
-    const d = entry.data || {};
-    let inspectHtml = '';
-    if (d.inspectError) {
-      inspectHtml = `<div class="error-banner">${escapeHtml(d.inspectError)}</div>`;
-    } else if (d.inspect) {
-      const findings = d.inspect.findings || [];
-      if (findings.length === 0) {
-        inspectHtml = `<div class="inspect-ok">OK：未发现卡死、报错或空结果假通过特征</div>`;
-      } else {
-        inspectHtml = findings.map((f) => `
-          <div class="finding ${escapeHtml(f.level)}">
-            <span class="finding-level">[${escapeHtml(f.level)}]</span>${escapeHtml(f.message)}
-          </div>`).join('');
+      bodyHtml = `<div style="color:var(--fg-muted);font-size:11.5px;">正在加载轨迹与巡检…</div>`;
+    } else if (entry.error) {
+      bodyHtml = `<div class="error-msg">${esc(entry.error)}</div>`;
+    } else {
+      const d = entry.data || {};
+      let inspectHtml = '';
+      if (d.inspectError) {
+        inspectHtml = `<div class="error-msg">${esc(d.inspectError)}</div>`;
+      } else if (d.inspect) {
+        const findings = d.inspect.findings || [];
+        inspectHtml = findings.length === 0
+          ? `<div class="inspect-ok">巡检正常 · 无卡死或报错</div>`
+          : findings.map((f) => `<div class="finding ${esc(f.level)}"><b>[${esc(f.level)}]</b> ${esc(f.message)}</div>`).join('');
       }
-    }
 
-    let tailHtml = '';
-    if (d.tailError) {
-      tailHtml = `<div class="error-banner">${escapeHtml(d.tailError)}</div>`;
-    } else if (d.tail) {
-      const items = d.tail.items || [];
-      if (items.length === 0) {
-        tailHtml = `<div style="color: var(--dsh-fg-muted); font-size: 12px;">暂无可读轨迹事件</div>`;
-      } else {
-        tailHtml = `<div class="timeline">${items.slice().reverse().map((it) => {
-          const tag = String(it.tag || '');
-          const tagClass = tag.includes('reasoning') ? 'reasoning' : tag.includes('result') ? 'result' : '';
-          return `
-            <div class="step-item">
-              <div class="step-head">
-                <span class="step-tag ${tagClass} mono">${escapeHtml(tag)}</span>
-                <span class="mono">#${escapeHtml(it.seq ?? '-')} · ${escapeHtml(it.ts || '')}</span>
-              </div>
-              <pre class="step-body">${escapeHtml(it.text || '')}</pre>
-            </div>`;
-        }).join('')}</div>`;
+      let tailHtml = '';
+      if (d.tailError) {
+        tailHtml = `<div class="error-msg">${esc(d.tailError)}</div>`;
+      } else if (d.tail) {
+        const items = d.tail.items || [];
+        tailHtml = items.length === 0
+          ? `<div style="color:var(--fg-muted);font-size:11.5px;">暂无轨迹事件</div>`
+          : `<div class="timeline">${items.slice().reverse().map((it) => {
+              const tag = String(it.tag || '');
+              const cls = tag.includes('reasoning') ? 'reasoning' : tag.includes('result') ? 'result' : '';
+              return `
+                <div class="step-row">
+                  <div class="step-head">
+                    <span class="step-tag ${cls} mono">${esc(tag)}</span>
+                    <span class="mono">#${esc(it.seq ?? '-')}</span>
+                  </div>
+                  <pre class="step-text">${esc(it.text || '')}</pre>
+                </div>`;
+            }).join('')}</div>`;
       }
+      bodyHtml = `${inspectHtml}${tailHtml}`;
     }
 
     return `
-      <div class="detail-panel">
-        <div class="detail-toolbar">
-          <span class="detail-sid mono">${escapeHtml(sessionId)}</span>
+      <div class="detail-box">
+        <div class="detail-meta">
+          <div class="detail-meta-left">
+            ${s.model ? `<span class="tag mono">${esc(s.model)}</span>` : ''}
+            <span>turn ${s.turns} · steps ${s.steps}</span>
+            ${pendingTag}
+          </div>
           <div class="detail-controls">
-            <select class="steps-select" data-action="steps" data-sid="${escapeHtml(sessionId)}" aria-label="显示步骤数">
-              <option value="5" ${state.steps === 5 ? 'selected' : ''}>最近 5 步</option>
-              <option value="6" ${state.steps === 6 ? 'selected' : ''}>最近 6 步</option>
-              <option value="10" ${state.steps === 10 ? 'selected' : ''}>最近 10 步</option>
-              <option value="20" ${state.steps === 20 ? 'selected' : ''}>最近 20 步</option>
+            <select class="steps-select" data-action="steps" data-sid="${esc(s.session_id)}">
+              <option value="5" ${state.steps === 5 ? 'selected' : ''}>5步</option>
+              <option value="6" ${state.steps === 6 ? 'selected' : ''}>6步</option>
+              <option value="10" ${state.steps === 10 ? 'selected' : ''}>10步</option>
+              <option value="20" ${state.steps === 20 ? 'selected' : ''}>20步</option>
             </select>
-            <button type="button" class="mini-btn" data-action="reload-detail" data-sid="${escapeHtml(sessionId)}">刷新详情</button>
+            <button type="button" class="mini-link" data-action="reload-detail" data-sid="${esc(s.session_id)}">刷新</button>
           </div>
         </div>
-        <div class="inspect-box">
-          <div class="section-label">异常巡检</div>
-          ${inspectHtml}
-        </div>
-        <div>
-          <div class="section-label">最近轨迹（最新在前）</div>
-          ${tailHtml}
-        </div>
+        ${bodyHtml}
       </div>`;
+  }
+
+  function renderIndicator(s) {
+    if (s.status === 'STALLED') {
+      return `<span class="dot stalled" title="挂起已超过 ${fmtDuration(s.max_pending_sec)}"></span>`;
+    }
+    if (s.status === 'RUNNING') {
+      return `<span class="spinner" title="运行中"></span>`;
+    }
+    if (state.pinned.has(s.session_id)) {
+      return `<span class="dot pinned" title="已置顶"></span>`;
+    }
+    return '';
   }
 
   function render() {
     syncThemeFromHost();
     if (!state.data) return;
 
-    els.countActive.textContent = String(state.data.runningCount ?? 0);
-    els.countAll.textContent = String(state.data.totalCount ?? 0);
-
-    const stalledNote = state.data.stalledCount > 0 ? ` · ${state.data.stalledCount} 个挂起预警` : '';
-    els.summaryBar.innerHTML = `
-      <span>运行中 ${state.data.runningCount} / 共 ${state.data.totalCount}${stalledNote}</span>
-      <span>更新于 ${fmtAbsTime(state.data.updatedAt).slice(11)}</span>`;
-
     if (!state.data.exists) {
-      els.list.innerHTML = `
-        <div class="empty-state">
-          <div class="empty-title">未找到 DeepSeek Harness 会话目录</div>
-          <div class="mono" style="font-size:11px;">${escapeHtml(state.data.dshDir)}</div>
-        </div>`;
+      els.tree.innerHTML = `<div class="empty-state">未找到 DeepSeek Harness 数据目录<br><span class="mono" style="font-size:11px;">${esc(state.data.dshDir)}</span></div>`;
       return;
     }
 
-    const sessions = getVisibleSessions();
-    if (sessions.length === 0) {
-      const hint = state.filter === 'active'
-        ? '当前没有运行中的 DeepSeek Harness 会话，可切换到「全部」查看历史会话。'
-        : '没有匹配的会话。';
-      els.list.innerHTML = `
-        <div class="empty-state">
-          <div class="empty-title">暂无会话</div>
-          <div>${hint}</div>
-        </div>`;
+    const groups = buildGroups();
+    if (groups.length === 0) {
+      els.tree.innerHTML = `<div class="empty-state">${state.activeOnly ? '当前没有运行中的会话' : '没有匹配的会话'}</div>`;
       return;
     }
 
-    els.list.innerHTML = sessions.map((s) => {
-      const expanded = state.expandedId === s.session_id;
-      const statusLower = s.status.toLowerCase();
-      const statusLabel = s.status === 'STALLED' ? '挂起预警' : s.status === 'RUNNING' ? 'RUNNING' : 'IDLE';
-      const pendingBadge = s.pending_count > 0
-        ? `<span class="pill ${s.status === 'STALLED' ? 'warn' : ''}">pending=${s.pending_count} (${fmtDuration(s.max_pending_sec)})</span>`
-        : '';
+    els.tree.innerHTML = groups.map((g) => {
+      const collapsed = state.collapsedWorkspaces.has(g.key);
+      const rowsHtml = collapsed ? '' : g.sessions.map((s) => {
+        const selected = state.selectedId === s.session_id;
+        const isPinned = state.pinned.has(s.session_id);
+        const cls = [
+          'sess-row',
+          selected ? 'selected' : '',
+          s.status === 'RUNNING' ? 'is-running' : '',
+          s.status === 'STALLED' ? 'is-stalled' : '',
+        ].filter(Boolean).join(' ');
+
+        return `
+          <div class="${cls}" data-action="toggle-session" data-sid="${esc(s.session_id)}" title="${esc(s.title || s.session_id)}">
+            <span class="sess-indicator">${renderIndicator(s)}</span>
+            <span class="sess-title">${esc(s.title || '(无标题)')}</span>
+            <span class="sess-time">${fmtRel(s.mtime_ms)}</span>
+            <span class="sess-hover-actions">
+              <button type="button" class="row-btn" data-action="toggle-session" data-sid="${esc(s.session_id)}" title="查看轨迹与巡检">${moreSvg()}</button>
+              <button type="button" class="row-btn" data-action="copy-id" data-sid="${esc(s.session_id)}" title="复制会话 ID">${copySvg()}</button>
+              <button type="button" class="row-btn ${isPinned ? 'pinned' : ''}" data-action="pin" data-sid="${esc(s.session_id)}" title="${isPinned ? '取消置顶' : '置顶'}">${pinSvg()}</button>
+            </span>
+          </div>
+          ${selected ? renderDetail(s) : ''}`;
+      }).join('');
 
       return `
-        <article class="card ${expanded ? 'expanded' : ''}" data-sid="${escapeHtml(s.session_id)}">
-          <div class="card-head" data-action="toggle" data-sid="${escapeHtml(s.session_id)}">
-            <div class="card-row-top">
-              <div class="card-title-wrap">
-                <span class="status-dot ${statusLower}" aria-hidden="true"></span>
-                <span class="card-title" title="${escapeHtml(s.title || s.session_id)}">${escapeHtml(s.title || '(无标题)')}</span>
-              </div>
-              <span class="status-tag ${statusLower}">${statusLabel}</span>
-            </div>
-            <div class="card-meta">
-              ${s.model ? `<span class="pill mono">${escapeHtml(s.model)}</span>` : ''}
-              <span>turn ${s.turns} · steps ${s.steps}</span>
-              ${pendingBadge}
-              <span title="${fmtAbsTime(s.mtime_ms)}">${fmtRelTime(s.mtime_ms)}</span>
-            </div>
-            <div class="card-footer">
-              <span class="cwd-text mono" title="${escapeHtml(s.cwd)}">${escapeHtml(shortPath(s.cwd))}</span>
-              <div class="card-actions">
-                <button type="button" class="mini-btn" data-action="copy-id" data-sid="${escapeHtml(s.session_id)}" title="复制会话 ID">复制 ID</button>
-              </div>
-            </div>
+        <section class="ws-group ${g.hasActive ? 'has-active' : ''}">
+          <div class="ws-row" data-action="toggle-ws" data-ws="${esc(g.key)}" title="${esc(g.cwd || g.label)}">
+            <span class="ws-icon">${folderSvg()}</span>
+            <span class="ws-name">${esc(g.label)}</span>
+            <span class="ws-count">${g.sessions.length}</span>
           </div>
-          ${expanded ? renderDetail(s.session_id) : ''}
-        </article>`;
+          <div class="ws-children">${rowsHtml}</div>
+        </section>`;
     }).join('');
   }
 
-  // Event listeners
-  els.tabActive.addEventListener('click', () => {
-    state.filter = 'active';
-    state._userPickedFilter = true;
-    updateFilterTabs();
+  els.btnSearch.addEventListener('click', () => {
+    state.searchOpen = !state.searchOpen;
+    els.btnSearch.classList.toggle('active', state.searchOpen);
+    els.searchWrap.classList.toggle('hidden', !state.searchOpen);
+    if (state.searchOpen) {
+      els.searchInput.focus();
+    } else if (state.query) {
+      state.query = '';
+      els.searchInput.value = '';
+      render();
+    }
+  });
+
+  els.btnFilter.addEventListener('click', () => {
+    state.activeOnly = !state.activeOnly;
+    els.btnFilter.classList.toggle('active', state.activeOnly);
+    els.btnFilter.setAttribute('aria-pressed', String(state.activeOnly));
+    els.btnFilter.title = state.activeOnly ? '当前：仅看运行中（点击查看全部）' : '仅看运行中';
     render();
   });
 
-  els.tabAll.addEventListener('click', () => {
-    state.filter = 'all';
-    state._userPickedFilter = true;
-    updateFilterTabs();
-    render();
+  els.btnRefresh.addEventListener('click', () => {
+    fetchSessions();
+    if (state.selectedId) fetchDetail(state.selectedId);
+    showToast('已刷新');
   });
 
   els.searchInput.addEventListener('input', (e) => {
@@ -322,17 +388,20 @@
     render();
   });
 
-  els.refreshBtn.addEventListener('click', () => {
-    fetchSessions();
-    if (state.expandedId) fetchDetail(state.expandedId);
-  });
+  els.tree.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-action]');
+    if (!el) return;
+    const action = el.dataset.action;
 
-  els.list.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-action]');
-    if (!btn) return;
-    const action = btn.dataset.action;
-    const sid = btn.dataset.sid;
+    if (action === 'toggle-ws') {
+      const key = el.dataset.ws;
+      if (state.collapsedWorkspaces.has(key)) state.collapsedWorkspaces.delete(key);
+      else state.collapsedWorkspaces.add(key);
+      render();
+      return;
+    }
 
+    const sid = el.dataset.sid;
     if (action === 'copy-id') {
       e.stopPropagation();
       navigator.clipboard?.writeText(sid).then(
@@ -342,31 +411,40 @@
       return;
     }
 
+    if (action === 'pin') {
+      e.stopPropagation();
+      if (state.pinned.has(sid)) state.pinned.delete(sid);
+      else state.pinned.add(sid);
+      savePinned(state.pinned);
+      render();
+      return;
+    }
+
     if (action === 'reload-detail') {
       e.stopPropagation();
       fetchDetail(sid);
       return;
     }
 
-    if (action === 'toggle') {
-      if (state.expandedId === sid) {
-        state.expandedId = null;
+    if (action === 'toggle-session') {
+      e.stopPropagation();
+      if (state.selectedId === sid) {
+        state.selectedId = null;
         render();
       } else {
-        state.expandedId = sid;
+        state.selectedId = sid;
         fetchDetail(sid);
       }
     }
   });
 
-  els.list.addEventListener('change', (e) => {
+  els.tree.addEventListener('change', (e) => {
     const sel = e.target.closest('select[data-action="steps"]');
     if (!sel) return;
     state.steps = Number(sel.value) || 6;
     fetchDetail(sel.dataset.sid);
   });
 
-  // Watch theme mutations synced by preload.js
   new MutationObserver(syncThemeFromHost).observe(document.documentElement, {
     attributes: true,
     attributeFilter: ['style', 'class', 'data-theme'],
@@ -374,5 +452,5 @@
 
   syncThemeFromHost();
   fetchSessions();
-  state.pollTimer = setInterval(fetchSessions, POLL_MS);
+  setInterval(fetchSessions, POLL_MS);
 })();
